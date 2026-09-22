@@ -1,0 +1,18 @@
+# User data and persistent history
+backend/downloads.json
+backend/downloads.json.tmp
+backend/config.json
+*.tmp_gdrive_*
+.tmp_*
+
+# Build binaries
+backend/*.exe
+backend/gdrive-downloader
+
+# Node
+frontend/node_modules/
+frontend/dist/
+.DS_Store
+Thumbs.db
+*~
+backend/*.exe~

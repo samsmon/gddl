@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  gdrive-downloader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gdrive-downloader:latest
+    container_name: gdrive-downloader
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - HOST=0.0.0.0
+      - DOWNLOAD_DIR=/downloads
+      - CONFIG_DIR=/config
+      - AUTH_ENABLED=true
+      - AUTH_USER=admin
+      - AUTH_PASS=adminadmin
+      # Optional: specify additional external hard drive mount paths for quick access in UI
+      # - EXTRA_DRIVES=/mnt/external_hdd,/mnt/nas_share
+    volumes:
+      # 1. State & Configuration (downloads.json & config.json survive reboots & container updates)
+      - ./config:/config
+
+      # 2. Primary download folder
+      - ./downloads:/downloads
+
+      # 3. External Hard Drives, USB drives, or NAS Shares:
+      # Linux / Ubuntu / Debian / Homelab:
+      # - /mnt/storage:/mnt/storage:rw
+      # - /media/external:/media/external:rw
+      #
+      # Synology NAS (DSM):
+      # - /volume1/downloads:/volume1/downloads:rw
+      # - /volume2/media:/volume2/media:rw
+      #
+      # Unraid / TrueNAS:
+      # - /mnt/user/downloads:/mnt/user/downloads:rw
+      #
+      # Windows (Docker Desktop):
+      # - D:\Downloads:/mnt/d_downloads:rw
+      # - E:\Storage:/mnt/external_e:rw
