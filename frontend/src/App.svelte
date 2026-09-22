@@ -4360,7 +4360,7 @@
     padding: 10px 12px;
     border: 1px solid var(--border-color);
     border-radius: 6px;
-    background: var(--card-bg);
+    background: var(--modal-bg);
     cursor: pointer;
     transition: all 0.15s ease;
   }
@@ -4436,7 +4436,7 @@
     left: 0;
     margin-top: 2px;
     min-width: 230px;
-    background: var(--card-bg);
+    background: var(--modal-bg);
     border: 1px solid var(--border-color);
     border-radius: 6px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);

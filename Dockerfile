@@ -7,9 +7,9 @@ COPY frontend/ ./
 RUN npm run build
 
 # Stage 2: Build Backend (Go)
-FROM golang:1.22-alpine AS backend-builder
+FROM golang:1.23-alpine AS backend-builder
 WORKDIR /app/backend
-COPY backend/go.mod backend/go.sum ./
+COPY backend/go.mod ./
 RUN go mod download
 COPY backend/ ./
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/gdrive-downloader main.go
