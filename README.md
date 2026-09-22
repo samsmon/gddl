@@ -11,32 +11,7 @@ A high-performance, self-hosted desktop download manager for Google Drive with a
 
 ---
 
-<a id="ai-agent-trigger-point"></a>
-> [!IMPORTANT]
-> ### 🤖 AI AGENT TRIGGER POINT & FAST-TRACK CONTEXT
-> **If you are an AI assistant or autonomous agent working on this codebase, read this section first to skip context searching:**
->
-> 1. **Architecture Overview:**
->    - **Backend (`/backend`)**: Pure Go HTTP daemon (`pkg/server`) using standard library `net/http`. Contains `pkg/queue` (worker pool & state machine), `pkg/gdrive` (token resolver & chunked stream downloader), `pkg/auth` (qBittorrent-style session auth & config manager), and `pkg/logger` (in-memory ring buffer for runtime logs).
->    - **Frontend (`/frontend`)**: Svelte 5 with reactive `$state` / `$derived` runes, compiled via Vite. Single Page Application with zero rainbow styling—uses clean, desktop-grade CSS variables and monochrome Google Material Symbols SVGs (`currentColor`).
->    - **Storage & State Persistence**: Server state is saved to `downloads.json` and `config.json`. Real-time disk sync ensures transfers that are deleted or moved from storage show as `MISSING / MOVED` with 1-click re-download.
->
-> 2. **Key Codebase Locations:**
->    - Entry point: [`backend/main.go`](backend/main.go) (supports `-port`, `-host`, `-dir`, `-config`, `-web`, `-auth`, `-user`, `-pass`, and matching env vars).
->    - API & FS browsing: [`backend/pkg/server/server.go`](backend/pkg/server/server.go) (`getAvailableDrives()` automatically discovers external HDDs, `/mnt`, `/media`, `/volume1-9`, and mount points).
->    - Transfer queue & persistence: [`backend/pkg/queue/manager.go`](backend/pkg/queue/manager.go).
->    - Google Drive streaming & ZIP engine: [`backend/pkg/gdrive/downloader.go`](backend/pkg/gdrive/downloader.go).
->    - Authentication & credentials: [`backend/pkg/auth/auth.go`](backend/pkg/auth/auth.go).
->    - Main desktop UI: [`frontend/src/App.svelte`](frontend/src/App.svelte).
->    - Storage browser modal: [`frontend/src/lib/FolderPicker.svelte`](frontend/src/lib/FolderPicker.svelte).
->
-> 3. **Design & Code Rules:**
->    - **Zero Emojis**: Do not add unicode emojis anywhere in the UI or codebase. Use monochrome Google open-source SVG icons (`currentColor`).
->    - **Server Safe**: All file path operations must be cross-platform safe (`filepath.Clean`, `os.PathSeparator`) and work inside Docker, Linux, Windows, and Synology NAS.
-
----
-
-## 📸 Quick View & Screenshots
+## Quick View & Screenshots
 
 ### Active Transfers & Real-Time Monitoring
 ![Active Transfers & Real-Time Monitoring](docs/screenshots/transfer_list.png)
@@ -48,21 +23,22 @@ A high-performance, self-hosted desktop download manager for Google Drive with a
 
 ---
 
-## ⚡ Core Features
+## Core Features
 
-- **🚀 Concurrent Multi-Worker Engine**: Configurable parallel workers (1 to 5) powered by lightweight Go goroutines.
-- **🛡️ Bypass Virus Scan Prompts**: Automatically extracts Google Drive confirmation tokens for large files (>100MB).
-- **🗜️ Smart Folder & ZIP Compression**: Paste any public or private Google Drive folder link. Choose between downloading as a subfolder or compressing all folder contents locally into a verified `.zip` archive with real-time compression progress.
-- **🔄 Real-Time File Presence & Missing Sync**: If files are moved, renamed, or deleted from disk, the application immediately updates their status to `MISSING / MOVED` and provides a 1-click re-download button.
-- **🍪 Google Cookie Session (Restricted Files)**: Download private files, shared team drives, or files hitting "Download quota exceeded" by pasting your session cookie into the secure Tools menu.
-- **🔒 Server-Ready Web UI Authentication**: Built-in authentication (qBittorrent-style) protecting your server or VPS from unauthorized access. Supports environment variables (`AUTH_ENABLED`, `AUTH_USER`, `AUTH_PASS`).
-- **💾 External HDD & NAS Auto-Detection**: The Jellyfin-style storage browser automatically detects external hard drives and mount points (`/mnt`, `/media`, `/volume1-9`, `D:\`, `E:\`).
-- **📋 In-App System Logs**: Real-time diagnostic logger with error filtering, clipboard copying, and live refresh to troubleshoot rate limits or Google network timeouts.
-- **⌨️ Keyboard Shortcuts**: Fully operable via desktop keybindings (`Ctrl+N`, `Ctrl+A`, `Del`, `Shift+Del`, `Space`, `Esc`).
+- **Concurrent Multi-Worker Engine**: Configurable parallel workers (1 to 5) powered by lightweight Go goroutines.
+- **Bypass Virus Scan Prompts**: Automatically extracts Google Drive confirmation tokens for large files (>100MB).
+- **Smart Folder & ZIP Compression**: Paste any public or private Google Drive folder link. Choose between downloading as a subfolder or compressing all folder contents locally into a verified `.zip` archive with real-time compression progress.
+- **Conflict & Duplicate Resolution**: Automatically checks for existing files on disk or duplicate tasks in the queue when pasting links. Provides 3 options: Keep both with auto-suffix `(2)`, Overwrite & Replace, or Re-monitor & Verify integrity with resume support.
+- **Real-Time File Presence & Missing Sync**: If files are moved, renamed, or deleted from disk, the application immediately updates their status to `MISSING / MOVED` and provides a 1-click re-download button.
+- **Google Cookie Session (Restricted Files)**: Download private files, shared team drives, or files hitting "Download quota exceeded" by pasting your session cookie into the secure Tools menu.
+- **Server-Ready Web UI Authentication**: Built-in authentication (qBittorrent-style) protecting your server or VPS from unauthorized access. Supports environment variables (`AUTH_ENABLED`, `AUTH_USER`, `AUTH_PASS`).
+- **External HDD & NAS Auto-Detection**: The Jellyfin-style storage browser automatically detects external hard drives and mount points (`/mnt`, `/media`, `/volume1-9`, `D:\`, `E:\`).
+- **In-App System Logs**: Real-time diagnostic logger with error filtering, clipboard copying, and live refresh to troubleshoot rate limits or Google network timeouts.
+- **Keyboard Shortcuts**: Fully operable via desktop keybindings (`Ctrl+N`, `Ctrl+A`, `Del`, `Shift+Del`, `Space`, `Esc`).
 
 ---
 
-## 🐳 Server Deployment & External Storage Setup
+## Server Deployment & External Storage Setup
 
 ### Option 1: Docker Compose (Recommended for Servers & NAS)
 
@@ -178,7 +154,7 @@ To make external USB hard drives or external storage permanently accessible:
 
 ---
 
-## ⚙️ Configuration Reference
+## Configuration Reference
 
 You can configure the application via command-line arguments or environment variables:
 
@@ -196,30 +172,36 @@ You can configure the application via command-line arguments or environment vari
 
 ---
 
-## 🌐 REST & Streaming API Documentation
+## REST & Streaming API Documentation
 
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
 | `/api/events` | `GET` | **Server-Sent Events (SSE)** stream delivering live download queue state, speed, ETA, and progress. |
 | `/api/downloads` | `GET` | Get all active, queued, and completed downloads as JSON. |
-| `/api/downloads/add` | `POST` | Add one or multiple Google Drive URLs. Accepts `{ links: [], target_folder: "", zip_mode: true }`. |
-| `/api/downloads/start` | `POST` | Start / resume one or multiple tasks. Accepts `{ ids: ["..."] }`. |
-| `/api/downloads/pause` | `POST` | Pause one or multiple running downloads. Accepts `{ ids: ["..."] }`. |
-| `/api/downloads/restart`| `POST` | Restart download from the beginning. Accepts `{ id: "..." }`. |
-| `/api/downloads/delete` | `POST` | Delete tasks from list. Supports optional disk deletion: `{ ids: [], delete_files: true }`. |
-| `/api/downloads/check`  | `POST` | Check real-time file presence on disk. Accepts `{ id: "..." }`. |
-| `/api/folders/resolve`  | `POST` | Inspect Google Drive folder contents before adding: `{ url: "..." }`. |
-| `/api/fs/browse`        | `GET`  | Browse server filesystem folders and drives: `?path=/mnt`. |
-| `/api/config`           | `GET` / `POST` | Read or update settings (Target folder, Concurrency, Google Cookie). |
-| `/api/auth/status`      | `GET`  | Check whether authentication is enabled and current login state. |
-| `/api/auth/login`       | `POST` | Authenticate into Web UI: `{ username: "", password: "" }`. |
-| `/api/auth/logout`      | `POST` | Terminate session and invalidate auth token. |
-| `/api/auth/credentials` | `POST` | Change admin username and password. |
-| `/api/logs`             | `GET` / `POST` | Fetch or clear execution and error logs. |
+| `/api/downloads` | `POST` | Add one or multiple Google Drive URLs. Accepts `{ links: [], target_folder: "", zip_mode: true, conflict_resolutions: {} }`. |
+| `/api/downloads/precheck` | `POST` | Fast conflict precheck against active queue and disk before adding. |
+| `/api/downloads/{id}/start` | `POST` | Start / resume task. |
+| `/api/downloads/{id}/pause` | `POST` | Pause running download. |
+| `/api/downloads/{id}/restart`| `POST` | Restart download from the beginning. |
+| `/api/downloads/{id}` | `DELETE` | Delete task from list. Supports optional disk deletion: `?delete_file=true`. |
+| `/api/downloads/{id}/check` | `POST` | Check real-time file presence on disk. |
+| `/api/downloads/check-all` | `POST` | Check disk presence for all files in list. |
+| `/api/downloads/clear` | `POST` | Clear completed downloads from list. |
+| `/api/folders/resolve` | `POST` | Inspect Google Drive folder contents before adding: `{ url: "..." }`. |
+| `/api/fs/browse` | `GET` | Browse server filesystem folders and drives: `?path=/mnt`. |
+| `/api/config` | `GET` / `POST` | Read or update settings (Target folder, Concurrency, Google Cookie). |
+| `/api/auth/status` | `GET` | Check whether authentication is enabled and current login state. |
+| `/api/auth/login` | `POST` | Authenticate into Web UI: `{ username: "", password: "" }`. |
+| `/api/auth/logout` | `POST` | Terminate session and invalidate auth token. |
+| `/api/auth/password` | `POST` | Change admin username and password. |
+| `/api/auth/toggle` | `POST` | Enable or disable Web UI authentication. |
+| `/api/gdrive/cookie` | `POST` | Save Google session cookie for quota bypass. |
+| `/api/gdrive/logout` | `POST` | Clear saved Google session cookie. |
+| `/api/logs` | `GET` / `DELETE` | Fetch or clear execution and error logs. |
 
 ---
 
-## ⌨️ Desktop Keyboard Shortcuts
+## Desktop Keyboard Shortcuts
 
 | Shortcut | Action |
 | :--- | :--- |
@@ -235,7 +217,7 @@ You can configure the application via command-line arguments or environment vari
 
 ---
 
-## 🛠️ Local Development & Build from Source
+## Local Development & Build from Source
 
 ### Prerequisites
 - **Go 1.22+**: [golang.org/dl](https://golang.org/dl/)
@@ -251,7 +233,7 @@ npm run build
 ### 2. Compile the Backend Binary
 ```bash
 cd ../backend
-go build -o gdrive-downloader.exe main.go
+go build -o gdrive-downloader.exe .
 ```
 
 ### 3. Run the Application
@@ -267,5 +249,5 @@ Open `http://localhost:8080` in your web browser.
 
 ---
 
-## 📄 License
+## License
 This project is open-source under the [MIT License](LICENSE).
