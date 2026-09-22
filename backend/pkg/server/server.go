@@ -798,7 +798,11 @@ func getAvailableDrives() []FolderItem {
 
 	// 5. Check if user configured custom EXTRA_DRIVES or DOWNLOAD_DIR environment variable
 	if extraDrives := os.Getenv("EXTRA_DRIVES"); extraDrives != "" {
-		for _, p := range strings.Split(extraDrives, string(os.PathListSeparator)) {
+		separator := string(os.PathListSeparator)
+		if strings.Contains(extraDrives, ",") {
+			separator = ","
+		}
+		for _, p := range strings.Split(extraDrives, separator) {
 			p = strings.TrimSpace(p)
 			if p != "" {
 				addDrive(filepath.Base(p)+" (Custom)", p)

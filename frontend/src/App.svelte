@@ -1476,7 +1476,7 @@
             <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z"/></svg></span>
             <span class="dropdown-text">Documentation & Guide</span>
           </button>
-          <a class="dropdown-item" href="https://github.com" target="_blank" rel="noopener noreferrer" onclick={closeMenus}>
+          <a class="dropdown-item" href="https://github.com/samsmon/gddl" target="_blank" rel="noopener noreferrer" onclick={closeMenus}>
             <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg></span>
             <span class="dropdown-text">Project GitHub Repository ↗</span>
           </a>
@@ -3064,7 +3064,7 @@
 
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick={() => showUpdateModal = false}>Close</button>
-          <a class="btn btn-primary" href="https://github.com" target="_blank" rel="noopener noreferrer" style="text-decoration: none;">
+          <a class="btn btn-primary" href="https://github.com/samsmon/gddl/releases" target="_blank" rel="noopener noreferrer" style="text-decoration: none;">
             View Releases
           </a>
         </div>
@@ -3107,7 +3107,7 @@
             A high-performance Google Drive downloader featuring multi-worker queuing, ZIP compression, chunked streaming, file integrity verification, and qBittorrent-style server authentication.
           </p>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.75rem; text-align: left; background: var(--table-row-alt); padding: 10px 14px; border-radius: 6px; border: 1px solid var(--border-subtle); margin-bottom: 12px;">
-            <div><span style="color: var(--text-dim);">Backend:</span> <strong style="color: var(--text-main);">Go 1.27 Concurrency</strong></div>
+            <div><span style="color: var(--text-dim);">Backend:</span> <strong style="color: var(--text-main);">Go 1.23 Concurrency</strong></div>
             <div><span style="color: var(--text-dim);">Frontend:</span> <strong style="color: var(--text-main);">Svelte 5 Runes + Vite</strong></div>
             <div><span style="color: var(--text-dim);">Storage:</span> <strong style="color: var(--text-main);">Realtime downloads.json</strong></div>
             <div><span style="color: var(--text-dim);">License:</span> <strong style="color: var(--text-main);">MIT Open Source</strong></div>
@@ -3115,7 +3115,7 @@
         </div>
 
         <div class="modal-footer">
-          <a class="btn btn-secondary" href="https://github.com" target="_blank" rel="noopener noreferrer" style="text-decoration: none;">
+          <a class="btn btn-secondary" href="https://github.com/samsmon/gddl" target="_blank" rel="noopener noreferrer" style="text-decoration: none;">
             GitHub Repository
           </a>
           <button class="btn btn-primary" onclick={() => showAboutModal = false}>OK</button>
