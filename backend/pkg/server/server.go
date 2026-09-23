@@ -99,6 +99,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/downloads/{id}/pause", s.handlePauseDownload)
 	mux.HandleFunc("POST /api/downloads/{id}/start", s.handleStartDownload)
 	mux.HandleFunc("POST /api/downloads/{id}/restart", s.handleRestartDownload)
+	mux.HandleFunc("POST /api/downloads/{id}/target-folder", s.handleUpdateDownloadTargetFolder)
 	mux.HandleFunc("POST /api/downloads/{id}/check", s.handleCheckDownloadFile)
 	mux.HandleFunc("POST /api/downloads/check-all", s.handleCheckAllFiles)
 	mux.HandleFunc("POST /api/downloads/clear", s.handleClearCompleted)
@@ -494,6 +495,30 @@ func (s *Server) handleRestartDownload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"restarted"}`))
+}
+
+func (s *Server) handleUpdateDownloadTargetFolder(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, `{"error":"id required"}`, http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		TargetFolder string `json:"target_folder"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	if err := s.manager.SetItemTargetFolder(id, req.TargetFolder); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "updated", "target_folder": req.TargetFolder})
 }
 
 func (s *Server) handleCheckDownloadFile(w http.ResponseWriter, r *http.Request) {

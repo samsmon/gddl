@@ -381,6 +381,7 @@
           max_concurrency: parseInt(maxConcurrency, 10) || 2
         })
       });
+      addTargetFolder = defaultFolder;
       showSettingsModal = false;
     } catch (e) {
       alert('Error saving settings: ' + e.message);
@@ -1112,18 +1113,50 @@
     openDeleteModal('completed', null, false);
   }
 
-  function openPickerFor(target) {
+  let relocateItemTargetId = $state(null);
+
+  function openAddModal() {
+    addTargetFolder = defaultFolder;
+    showAddModal = true;
+  }
+
+  function openPickerFor(target, itemId = null) {
     folderPickerTarget = target;
+    relocateItemTargetId = itemId;
     showFolderPicker = true;
   }
 
-  function handleFolderSelected(path) {
+  async function handleFolderSelected(path) {
     if (folderPickerTarget === 'add') {
       addTargetFolder = path;
     } else if (folderPickerTarget === 'settings') {
       defaultFolder = path;
+      addTargetFolder = path;
+      await saveConfig();
+    } else if (folderPickerTarget === 'item' && relocateItemTargetId) {
+      await setItemFolder(relocateItemTargetId, path);
     }
     showFolderPicker = false;
+  }
+
+  async function setItemFolder(id, newPath) {
+    try {
+      const res = await fetch(`/api/downloads/${id}/target-folder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_folder: newPath })
+      });
+      if (res.ok) {
+        fetchDownloads();
+      } else {
+        const err = await res.json().catch(() => ({ error: 'Failed to update folder' }));
+        alert(err.error || 'Failed to update save path');
+      }
+    } catch (e) {
+      alert('Error: ' + e.message);
+    } finally {
+      relocateItemTargetId = null;
+    }
   }
 
   // Keyboard Shortcuts (Ctrl+A select all, Escape unselect, Delete to delete with 2 options, Space to pause/resume)
@@ -1174,7 +1207,7 @@
 
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
       e.preventDefault();
-      showAddModal = true;
+      openAddModal();
       return;
     }
 
@@ -1320,7 +1353,7 @@
       </button>
       {#if openMenu === 'file'}
         <div class="menubar-dropdown" role="menu">
-          <button class="dropdown-item" onclick={() => { showAddModal = true; closeMenus(); }}>
+          <button class="dropdown-item" onclick={() => { openAddModal(); closeMenus(); }}>
             <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg></span>
             <span class="dropdown-text">Add Links...</span>
             <span class="dropdown-shortcut">Ctrl+N</span>
@@ -1507,7 +1540,7 @@
 
     <div class="toolbar-actions">
       <!-- Add Links -->
-      <button class="tb-btn tb-btn-primary" onclick={() => showAddModal = true} title="Add new Google Drive download links">
+      <button class="tb-btn tb-btn-primary" onclick={openAddModal} title="Add new Google Drive download links">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
           <line x1="12" y1="5" x2="12" y2="19"></line>
           <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -2196,7 +2229,11 @@
             </div>
             <div class="detail-col">
               <div><span class="prop-label">ETA:</span> <span class="prop-val font-mono">{formatTime(selectedItem.eta_seconds)}</span></div>
-              <div><span class="prop-label">Save Path:</span> <span class="prop-val">{selectedItem.target_folder}</span></div>
+              <div>
+                <span class="prop-label">Save Path:</span>
+                <span class="prop-val">{selectedItem.target_folder}</span>
+                <button class="btn-browse-mini" style="margin-left: 6px; padding: 1px 6px; font-size: 11px;" onclick={() => openPickerFor('item', selectedItem.id)} title="Change save folder for this download">Change...</button>
+              </div>
               <div><span class="prop-label">Added / Last Try:</span> <span class="prop-val font-mono">{formatDateTime(selectedItem.created_at)} / {formatDateTime(selectedItem.last_try_at)}</span></div>
               {#if selectedItem.current_file}
                 <div>
@@ -2410,6 +2447,23 @@
       {/if}
 
       <div class="context-divider"></div>
+
+      {#if contextMenuItem || selectedItem}
+        <button
+          class="context-item"
+          onclick={() => {
+            const targetId = contextMenuItem ? contextMenuItem.id : (selectedItem ? selectedItem.id : null);
+            if (targetId) openPickerFor('item', targetId);
+            closeContextMenu();
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          </svg>
+          <span>Change Save Location / Move...</span>
+        </button>
+        <div class="context-divider"></div>
+      {/if}
 
       <!-- Delete -->
       <button
@@ -2940,7 +2994,7 @@
   <!-- Jellyfin Interactive Folder Picker Modal -->
   {#if showFolderPicker}
     <FolderPicker
-      initialPath={folderPickerTarget === 'add' ? addTargetFolder : defaultFolder}
+      initialPath={folderPickerTarget === 'add' ? addTargetFolder : (folderPickerTarget === 'item' && selectedItem ? selectedItem.target_folder : defaultFolder)}
       onSelect={handleFolderSelected}
       onClose={() => showFolderPicker = false}
     />

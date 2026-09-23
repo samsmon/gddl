@@ -1430,6 +1430,55 @@ func (m *Manager) Restart(id string) error {
 	return nil
 }
 
+func (m *Manager) SetItemTargetFolder(id string, newFolder string) error {
+	newFolder = strings.TrimSpace(newFolder)
+	if newFolder == "" {
+		return fmt.Errorf("target folder cannot be empty")
+	}
+
+	m.mu.RLock()
+	item, exists := m.items[id]
+	m.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("item not found: %s", id)
+	}
+
+	item.mu.Lock()
+	oldFolder := item.TargetFolder
+	item.TargetFolder = newFolder
+
+	// If file was already downloaded to oldFolder, try moving it to newFolder if it exists
+	if oldFolder != "" && oldFolder != newFolder {
+		oldPath := filepath.Join(oldFolder, item.Filename)
+		newPath := filepath.Join(newFolder, item.Filename)
+		if fi, err := os.Stat(oldPath); err == nil && !fi.IsDir() {
+			_ = os.MkdirAll(newFolder, 0755)
+			if err := os.Rename(oldPath, newPath); err != nil {
+				logger.Warnf("Queue", "Could not move existing file to new folder: %v", err)
+			} else {
+				logger.Infof("Queue", "Moved completed file from '%s' to '%s'", oldPath, newPath)
+			}
+		}
+		// Also move .part file if any
+		oldPart := oldPath + ".part"
+		newPart := newPath + ".part"
+		if _, err := os.Stat(oldPart); err == nil {
+			_ = os.MkdirAll(newFolder, 0755)
+			_ = os.Rename(oldPart, newPart)
+		}
+	}
+	item.mu.Unlock()
+
+	// Recheck existence in case it was missing
+	go m.CheckFileExistence(id)
+
+	logger.Infof("Queue", "Changed save location of '%s' to '%s'", item.Filename, newFolder)
+	m.triggerBroadcast()
+	m.saveToDisk()
+	return nil
+}
+
 func (m *Manager) Cancel(id string) error {
 	m.mu.RLock()
 	item, exists := m.items[id]
