@@ -28,12 +28,14 @@ const (
 // 'ggdl_temp' folder in the user's personal Google Drive, downloading them cleanly,
 // and permanently purging the cloned copy after completion.
 type BypassManager struct {
-	oauthMgr     *OAuthManager
-	apiClient    *http.Client
-	streamClient *http.Client
-	folderMu     sync.RWMutex
-	tempFolderID string
-	autoBypass   bool
+	oauthMgr          *OAuthManager
+	apiClient         *http.Client
+	streamClient      *http.Client
+	chunkedDownloader *ChunkedDownloader
+	folderMu          sync.RWMutex
+	tempFolderID      string
+	autoBypass        bool
+	chunksPerDownload int
 }
 
 // NewBypassManager creates a new BypassManager with the provided OAuthManager.
@@ -61,17 +63,47 @@ func NewBypassManager(oauthMgr *OAuthManager, autoBypass bool) *BypassManager {
 		WriteBufferSize:       1024 * 1024,
 	}
 
+	streamClient := &http.Client{
+		Transport: streamTransport,
+		Timeout:   0, // NO TIMEOUT for streaming file downloads!
+	}
+
 	return &BypassManager{
-		oauthMgr:   oauthMgr,
-		autoBypass: autoBypass,
+		oauthMgr:          oauthMgr,
+		autoBypass:        autoBypass,
+		chunksPerDownload: 4,
 		apiClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
-		streamClient: &http.Client{
-			Transport: streamTransport,
-			Timeout:   0, // NO TIMEOUT for streaming file downloads!
-		},
+		streamClient:      streamClient,
+		chunkedDownloader: NewChunkedDownloader(streamClient),
 	}
+}
+
+// SetChunksPerDownload configures the parallel download streams per file.
+func (bm *BypassManager) SetChunksPerDownload(n int) {
+	if bm == nil {
+		return
+	}
+	bm.folderMu.Lock()
+	defer bm.folderMu.Unlock()
+	if n <= 0 {
+		n = 4
+	}
+	bm.chunksPerDownload = n
+}
+
+// GetChunksPerDownload returns the configured parallel download streams.
+func (bm *BypassManager) GetChunksPerDownload() int {
+	if bm == nil {
+		return 4
+	}
+	bm.folderMu.RLock()
+	defer bm.folderMu.RUnlock()
+	if bm.chunksPerDownload <= 0 {
+		return 4
+	}
+	return bm.chunksPerDownload
 }
 
 // IsAvailable returns true if OAuth is connected.
@@ -438,6 +470,38 @@ func (bm *BypassManager) DownloadClonedFile(
 	totalSize := resp.ContentLength
 	if resp.StatusCode == http.StatusPartialContent {
 		totalSize += startOffset
+	}
+
+	chunks := bm.GetChunksPerDownload()
+	if startOffset == 0 && totalSize > 10*1024*1024 && chunks > 1 {
+		resp.Body.Close()
+		logger.Infof("Bypass", "Downloading '%s' (%d bytes) with %d parallel chunk streams", filename, totalSize, chunks)
+
+		headers := http.Header{}
+		headers.Set("Authorization", "Bearer "+token)
+		headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+		copied, err := bm.chunkedDownloader.DownloadSegmented(
+			ctx,
+			destPath,
+			apiURL,
+			totalSize,
+			headers,
+			chunks,
+			onProgress,
+		)
+		if err != nil {
+			logger.Errorf("Bypass", "Parallel download failed for '%s': %v", filename, err)
+			return filename, copied, err
+		}
+
+		if integrityErr := VerifyFileIntegrity(destPath, totalSize); integrityErr != nil {
+			logger.Errorf("Integrity", "Integrity check failed for '%s': %v", filename, integrityErr)
+			return filename, copied, fmt.Errorf("CORRUPT: %w", integrityErr)
+		}
+
+		logger.Successf("Bypass", "Saved '%s' successfully (%d bytes) via %d streams", filename, copied, chunks)
+		return filename, copied, nil
 	}
 
 	var out *os.File

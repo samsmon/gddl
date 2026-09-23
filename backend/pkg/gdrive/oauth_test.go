@@ -153,3 +153,46 @@ func TestBypassManager_EnsureTempFolder(t *testing.T) {
 	ctx := context.Background()
 	_ = ctx
 }
+
+func TestImportRcloneToken(t *testing.T) {
+	var savedToken *OAuthToken
+	var savedEmail string
+	om := NewOAuthManager("id", "secret", "http://localhost:8099/callback", nil, "", func(tok *OAuthToken, email string) {
+		savedToken = tok
+		savedEmail = email
+	})
+
+	sampleJSON := `{"access_token":"ya29.sample_test_token_12345","token_type":"Bearer","refresh_token":"1//0g_sample_refresh_token","expiry":"2030-01-01T00:00:00Z"}`
+
+	tok, email, err := om.ImportRcloneToken(context.Background(), sampleJSON)
+	if err != nil {
+		t.Fatalf("ImportRcloneToken failed: %v", err)
+	}
+
+	if tok.AccessToken != "ya29.sample_test_token_12345" {
+		t.Errorf("expected access_token, got: %s", tok.AccessToken)
+	}
+	if tok.RefreshToken != "1//0g_sample_refresh_token" {
+		t.Errorf("expected refresh_token, got: %s", tok.RefreshToken)
+	}
+	if savedToken == nil || savedToken.AccessToken != tok.AccessToken {
+		t.Errorf("expected onTokenSave callback to be invoked with token")
+	}
+	if email == "" {
+		t.Errorf("expected non-empty email")
+	}
+	_ = savedEmail
+
+	// Also test rclone console output wrapped with text
+	wrapped := `Paste the following into your remote machine --->
+{"access_token":"ya29.wrapped_token","token_type":"Bearer","refresh_token":"1//wrapped_refresh","expiry":"2030-01-01T00:00:00Z"}
+<--- End paste`
+
+	tok2, _, err2 := om.ImportRcloneToken(context.Background(), wrapped)
+	if err2 != nil {
+		t.Fatalf("ImportRcloneToken wrapped failed: %v", err2)
+	}
+	if tok2.AccessToken != "ya29.wrapped_token" {
+		t.Errorf("expected wrapped access token, got: %s", tok2.AccessToken)
+	}
+}

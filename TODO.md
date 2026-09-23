@@ -1,41 +1,39 @@
-# GDDL - Project Roadmap & Next Tasks
+# GDDL - Project Roadmap & Completed Milestones
 
-## 📋 Backlog / Planned Features
+## ✅ Completed Milestones
 
-### 1. 🔄 Rclone Token Direct Import ("Login with Rclone" / Acefile style)
-- **Goal:** Allow users to connect Google Drive without creating their own Google Cloud Project, Client ID, or Client Secret.
+### 1. ⚡ IDM-Style Multi-Chunk / Parallel Segmented Downloader
+- **Implemented:** Parallel HTTP Range segmented downloading for files >10 MB using RFC 7233 byte ranges and zero-merging `WriteAt`.
+- **Capabilities:**
+  - Bypasses Google Drive's 10 MB/s single-stream bottleneck safely and effectively.
+  - Fully integrated in both direct downloads (`downloader.go`) and quota bypass clones (`bypass.go`).
+  - Configurable chunk count in Settings Modal (1, 2, 4, 8, 16 streams, default 4).
+  - Pre-allocates destination files with `Truncate` to minimize disk fragmentation and allow parallel chunk writes.
+  - Comprehensive unit test with mock HTTP Range server (`chunked_test.go`).
+
+### 2. 🔄 Rclone Token Direct Import ("Login with Rclone" / Acefile Style)
+- **Implemented:** Dedicated direct token import for Google Drive OAuth.
 - **Workflow:**
-  - User runs `rclone authorize "drive"` on their local machine.
-  - User copies the resulting JSON token:
-    ```json
-    {"access_token":"ya29...","token_type":"Bearer","refresh_token":"1//0g...","expiry":"..."}
-    ```
-  - User pastes it into GDDL in a dedicated "Import Rclone Token" input.
-  - GDDL parses and saves the token to `config.json`, enabling automated `ggdl_temp` quota bypass immediately.
-- **Components to update:**
-  - `backend/pkg/server/server.go`: Endpoint `POST /api/gdrive/oauth/token-import`
-  - `backend/pkg/gdrive/oauth.go`: Method `ImportRawToken(jsonStr string)`
-  - `frontend/src/App.svelte`: Add "Login via Rclone Token" tab/box with instructions.
+  - User runs `rclone authorize "drive"` on any terminal.
+  - User pastes the resulting JSON token (or snippet from `rclone.conf`).
+  - GDDL validates and parses the token, auto-resolves account email via Google UserInfo API, and saves it into `config.json`.
+  - Enables instant `ggdl_temp` quota bypass without requiring users to configure their own Google Cloud Project or Test Users.
+  - Supported via `POST /api/gdrive/oauth/import-token` and frontend Account Modal Option 1.
+
+### 3. 🌐 Full English Internationalization
+- **Implemented:** Standardized 100% of user-facing UI labels, modals, hints, guide accordions, status banners, and code comments to clean, professional English across `frontend/src/App.svelte` and backend services.
+- **Documentation:** Added clear instructions and setup tips in the in-app OAuth modal, including how switching Google Cloud publishing status from **Testing** to **In production (Publish App)** allows any Google account to authenticate without being added as a Test User.
+
+### 4. 🛡️ Download Reliability & Error Logging
+- Replaced 60-second HTTP client body timeout with indefinite streaming client (`Timeout: 0`) in `bypass.go`, eliminating `context deadline exceeded` errors on long downloads.
+- Added comprehensive logger calls (`logger.Errorf`) for single-file download failures in `queue/manager.go` to ensure all errors appear in real-time UI logs.
 
 ---
 
-### 2. 🌐 Full Internationalization / Translate Indonesian Text to English
-- **Goal:** Standardize all user-facing text and backend responses to professional, clean English.
-- **Tasks:**
-  - **Frontend UI (`frontend/src/App.svelte` & components):**
-    - Account Modal: Translate OAuth tab & Cookie Pool tab labels, guides, and button tooltips.
-    - Settings Modal: Translate download folder, concurrency, and theme options.
-    - Menubar & Action Bars: Check for any remaining Indonesian tooltips or strings.
-    - Status badges, error banners, and conflict resolution modals.
-    - Help accordion: "Panduan 1 Menit" -> "1-Minute Quick Setup Guide".
-  - **Backend Messages:**
-    - Audit all error messages in `backend/pkg/server/server.go`, `downloader.go`, `oauth.go`, and `bypass.go`.
-    - Ensure clean, consistent JSON error responses in English.
-
----
-
-### 3. 📖 Documentation & Setup Tips
-- Add a tip in the OAuth setup guide indicating that switching Publishing Status from **Testing** to **In Production (Publish App)** in Google Cloud Console allows *any* Google account to log in without being manually registered as a Test User.
+## 📋 Backlog / Next Ideas
+- [ ] Multi-thread speed graphs / chunk visualization widget in detail drawer.
+- [ ] Auto-refresh token health indicator in status bar.
+- [ ] Optional proxy / SOCKS5 support for segmented streams.
 
 ---
 

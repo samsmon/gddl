@@ -379,3 +379,89 @@ func (om *OAuthManager) fetchUserEmail(ctx context.Context, accessToken string) 
 	}
 	return userInfo.Email, nil
 }
+
+// ImportRcloneToken parses and applies a token generated from 'rclone authorize "drive"' or rclone.conf.
+func (om *OAuthManager) ImportRcloneToken(ctx context.Context, rawInput string) (*OAuthToken, string, error) {
+	raw := strings.TrimSpace(rawInput)
+	if raw == "" {
+		return nil, "", errors.New("token payload cannot be empty")
+	}
+
+	// Locate JSON block between { and }
+	startIdx := strings.Index(raw, "{")
+	endIdx := strings.LastIndex(raw, "}")
+	if startIdx == -1 || endIdx == -1 || endIdx <= startIdx {
+		return nil, "", errors.New("no valid JSON object found in input")
+	}
+
+	jsonBlob := raw[startIdx : endIdx+1]
+
+	var parsed struct {
+		AccessToken  string      `json:"access_token"`
+		TokenType    string      `json:"token_type"`
+		RefreshToken string      `json:"refresh_token"`
+		Expiry       interface{} `json:"expiry"`
+	}
+
+	if err := json.Unmarshal([]byte(jsonBlob), &parsed); err != nil {
+		return nil, "", fmt.Errorf("invalid token JSON: %w", err)
+	}
+
+	if parsed.AccessToken == "" && parsed.RefreshToken == "" {
+		return nil, "", errors.New("token JSON must contain at least access_token or refresh_token")
+	}
+
+	tokenType := parsed.TokenType
+	if tokenType == "" {
+		tokenType = "Bearer"
+	}
+
+	var expiry time.Time
+	if parsed.Expiry != nil {
+		switch v := parsed.Expiry.(type) {
+		case string:
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				expiry = t
+			} else if t, err := time.Parse("2006-01-02T15:04:05.999999999Z07:00", v); err == nil {
+				expiry = t
+			}
+		}
+	}
+	if expiry.IsZero() {
+		// Default 1 hour from now
+		expiry = time.Now().Add(1 * time.Hour)
+	}
+
+	tok := &OAuthToken{
+		AccessToken:  parsed.AccessToken,
+		TokenType:    tokenType,
+		RefreshToken: parsed.RefreshToken,
+		Expiry:       expiry,
+	}
+
+	// Attempt to resolve email
+	email := ""
+	if tok.AccessToken != "" {
+		em, err := om.fetchUserEmail(ctx, tok.AccessToken)
+		if err == nil && em != "" {
+			email = em
+		}
+	}
+	if email == "" {
+		email = "Google Account (Rclone Import)"
+	}
+
+	om.mu.Lock()
+	om.token = tok
+	om.email = email
+	saveCb := om.onTokenSave
+	om.mu.Unlock()
+
+	if saveCb != nil {
+		saveCb(tok, email)
+	}
+
+	logger.Successf("OAuth", "Successfully imported Rclone Google Drive token for account: %s", email)
+	return tok, email, nil
+}
+

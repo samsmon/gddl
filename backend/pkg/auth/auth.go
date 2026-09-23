@@ -81,6 +81,7 @@ type Config struct {
 	Salt                    string             `json:"salt"`
 	DownloadFolder          string             `json:"download_folder"`
 	MaxConcurrency          int                `json:"max_concurrency"`
+	ChunksPerDownload       int                `json:"chunks_per_download"`
 	GoogleCookie            string             `json:"google_cookie"`
 	GoogleCookies           []CookieEntry      `json:"google_cookies,omitempty"`
 	GoogleOAuthClientID     string             `json:"google_oauth_client_id,omitempty"`
@@ -136,6 +137,9 @@ func (m *Manager) loadOrInit(defaultFolder string, defaultConcurrency int) error
 			if m.config.MaxConcurrency <= 0 {
 				m.config.MaxConcurrency = defaultConcurrency
 			}
+			if m.config.ChunksPerDownload <= 0 {
+				m.config.ChunksPerDownload = 4
+			}
 			if len(m.config.GoogleCookies) == 0 && m.config.GoogleCookie != "" {
 				m.config.GoogleCookies = []CookieEntry{
 					{
@@ -152,13 +156,14 @@ func (m *Manager) loadOrInit(defaultFolder string, defaultConcurrency int) error
 	// First time initialization with defaults
 	salt := generateRandomHex(16)
 	m.config = Config{
-		AuthEnabled:     true,
-		Username:        "admin",
-		Salt:            salt,
-		PasswordHash:    hashPassword("adminadmin", salt),
-		DownloadFolder:  defaultFolder,
-		MaxConcurrency:  defaultConcurrency,
-		AutoBypassQuota: true,
+		AuthEnabled:       true,
+		Username:          "admin",
+		Salt:              salt,
+		PasswordHash:      hashPassword("adminadmin", salt),
+		DownloadFolder:    defaultFolder,
+		MaxConcurrency:    defaultConcurrency,
+		ChunksPerDownload: 4,
+		AutoBypassQuota:   true,
 	}
 
 	return m.saveLocked()
@@ -190,7 +195,26 @@ func (m *Manager) GetConfig() Config {
 	return m.config
 }
 
-func (m *Manager) UpdateConfig(folder string, concurrency int, googleCookie string) error {
+func (m *Manager) GetChunksPerDownload() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.config.ChunksPerDownload <= 0 {
+		return 4
+	}
+	return m.config.ChunksPerDownload
+}
+
+func (m *Manager) SetChunksPerDownload(n int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n <= 0 {
+		n = 4
+	}
+	m.config.ChunksPerDownload = n
+	return m.saveLocked()
+}
+
+func (m *Manager) UpdateConfig(folder string, concurrency int, chunks int, googleCookie string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -199,6 +223,9 @@ func (m *Manager) UpdateConfig(folder string, concurrency int, googleCookie stri
 	}
 	if concurrency > 0 {
 		m.config.MaxConcurrency = concurrency
+	}
+	if chunks > 0 {
+		m.config.ChunksPerDownload = chunks
 	}
 	if googleCookie != "" {
 		googleCookie = CleanCookieString(googleCookie)

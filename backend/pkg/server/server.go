@@ -40,12 +40,13 @@ type ResolveFolderRequest struct {
 }
 
 type ConfigData struct {
-	DownloadFolder string `json:"download_folder"`
-	MaxConcurrency int    `json:"max_concurrency"`
-	GoogleCookie   string `json:"google_cookie,omitempty"`
-	HasLogin       bool   `json:"has_login"`
-	AuthEnabled    bool   `json:"auth_enabled"`
-	Username       string `json:"username"`
+	DownloadFolder    string `json:"download_folder"`
+	MaxConcurrency    int    `json:"max_concurrency"`
+	ChunksPerDownload int    `json:"chunks_per_download"`
+	GoogleCookie      string `json:"google_cookie,omitempty"`
+	HasLogin          bool   `json:"has_login"`
+	AuthEnabled       bool   `json:"auth_enabled"`
+	Username          string `json:"username"`
 }
 
 type FolderItem struct {
@@ -93,6 +94,11 @@ func NewServer(manager *queue.Manager, authMgr *auth.Manager, distPath string) *
 
 	// Link bypass manager to downloader for automatic quota bypass
 	manager.Downloader().SetBypassManager(bypassMgr)
+
+	// Link chunks per download configuration from authMgr to downloader & bypassMgr
+	chunks := authMgr.GetChunksPerDownload()
+	manager.Downloader().SetChunksPerDownload(chunks)
+	bypassMgr.SetChunksPerDownload(chunks)
 
 	s := &Server{
 		manager:   manager,
@@ -162,6 +168,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/gdrive/oauth/auth-url", s.handleGetOAuthAuthURL)
 	mux.HandleFunc("GET /api/gdrive/oauth/callback", s.handleOAuthCallback)
 	mux.HandleFunc("POST /api/gdrive/oauth/manual-code", s.handleOAuthManualCode)
+	mux.HandleFunc("POST /api/gdrive/oauth/import-token", s.handleOAuthImportToken)
 	mux.HandleFunc("POST /api/gdrive/oauth/disconnect", s.handleOAuthDisconnect)
 	mux.HandleFunc("POST /api/gdrive/oauth/cleanup-temp", s.handleOAuthCleanupTemp)
 
@@ -658,11 +665,12 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	cookie := s.manager.Downloader().GetGoogleCookie()
 	cfg := s.authMgr.GetConfig()
 	res := ConfigData{
-		DownloadFolder: s.manager.TargetFolder,
-		MaxConcurrency: s.manager.MaxConcurrency,
-		HasLogin:       cookie != "",
-		AuthEnabled:    cfg.AuthEnabled,
-		Username:       cfg.Username,
+		DownloadFolder:    s.manager.TargetFolder,
+		MaxConcurrency:    s.manager.MaxConcurrency,
+		ChunksPerDownload: s.authMgr.GetChunksPerDownload(),
+		HasLogin:          cookie != "",
+		AuthEnabled:       cfg.AuthEnabled,
+		Username:          cfg.Username,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
@@ -681,12 +689,16 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if cfg.MaxConcurrency > 0 {
 		s.manager.MaxConcurrency = cfg.MaxConcurrency
 	}
+	if cfg.ChunksPerDownload > 0 {
+		s.manager.Downloader().SetChunksPerDownload(cfg.ChunksPerDownload)
+		s.bypassMgr.SetChunksPerDownload(cfg.ChunksPerDownload)
+	}
 	if cfg.GoogleCookie != "" {
 		s.manager.Downloader().SetGoogleCookie(cfg.GoogleCookie)
 	}
 
 	// Persist to disk via authMgr
-	_ = s.authMgr.UpdateConfig(cfg.DownloadFolder, cfg.MaxConcurrency, cfg.GoogleCookie)
+	_ = s.authMgr.UpdateConfig(cfg.DownloadFolder, cfg.MaxConcurrency, cfg.ChunksPerDownload, cfg.GoogleCookie)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
@@ -1458,6 +1470,31 @@ func (s *Server) handleOAuthManualCode(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"email":   email,
+	})
+}
+
+type ImportTokenRequest struct {
+	Token string `json:"token"`
+}
+
+func (s *Server) handleOAuthImportToken(w http.ResponseWriter, r *http.Request) {
+	var req ImportTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	tok, email, err := s.oauthMgr.ImportRcloneToken(r.Context(), req.Token)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"email":   email,
+		"expiry":  tok.Expiry,
 	})
 }
 

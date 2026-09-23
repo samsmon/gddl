@@ -10,6 +10,7 @@
   let lastClickedId = $state(null);
   let defaultFolder = $state('C:\\Users\\Sam\\Downloads');
   let maxConcurrency = $state(2);
+  let chunksPerDownload = $state(4);
   let backendConnected = $state(false);
   let currentTheme = $state('dark');
   let hasLogin = $state(false);
@@ -356,6 +357,7 @@
           addTargetFolder = cfg.download_folder;
         }
         if (cfg.max_concurrency) maxConcurrency = cfg.max_concurrency;
+        if (cfg.chunks_per_download) chunksPerDownload = cfg.chunks_per_download;
         hasLogin = !!cfg.has_login;
         if (typeof cfg.auth_enabled === 'boolean') {
           authEnabled = cfg.auth_enabled;
@@ -378,7 +380,8 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           download_folder: defaultFolder,
-          max_concurrency: parseInt(maxConcurrency, 10) || 2
+          max_concurrency: parseInt(maxConcurrency, 10) || 2,
+          chunks_per_download: parseInt(chunksPerDownload, 10) || 4
         })
       });
       addTargetFolder = defaultFolder;
@@ -650,8 +653,10 @@
   let oauthEmail = $state('');
   let oauthAutoBypass = $state(true);
   let oauthManualCode = $state('');
+  let rcloneTokenInput = $state('');
   let isSavingOAuthConfig = $state(false);
   let isSubmittingManualCode = $state(false);
+  let isImportingRcloneToken = $state(false);
   let isCleaningTempFolder = $state(false);
   let oauthMessage = $state('');
   let oauthError = $state('');
@@ -791,6 +796,35 @@
       oauthError = 'Network error: ' + e.message;
     } finally {
       isSubmittingManualCode = false;
+    }
+  }
+
+  async function importRcloneToken() {
+    if (!rcloneTokenInput.trim()) return;
+    oauthError = '';
+    oauthMessage = '';
+    isImportingRcloneToken = true;
+    try {
+      const res = await fetch('/api/gdrive/oauth/import-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: rcloneTokenInput.trim() })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        oauthConnected = true;
+        oauthEmail = data.email || '';
+        rcloneTokenInput = '';
+        oauthMessage = `Rclone token imported successfully! Connected as ${data.email || 'Google User'}.`;
+        await fetchOAuthStatus();
+        setTimeout(() => { oauthMessage = ''; }, 5000);
+      } else {
+        oauthError = data.error || 'Failed to import Rclone token';
+      }
+    } catch (e) {
+      oauthError = 'Network error: ' + e.message;
+    } finally {
+      isImportingRcloneToken = false;
     }
   }
 
@@ -1497,7 +1531,7 @@
     }, 700);
   }
 
-  // Unified 2-Option Delete Modal ("apply di button delete dan segala delete")
+  // Unified 2-Option Delete Modal (applied to Delete toolbar button and all delete context actions)
   function openDeleteModal(mode = 'selected', id = null, defaultWithFile = false) {
     deleteModalTarget = mode;
     deleteModalSingleId = id;
@@ -3483,10 +3517,52 @@
               </div>
             {/if}
 
-            <!-- Authorized Redirect URI Info Box -->
+            <!-- METHOD 1: QUICK CONNECT VIA RCLONE TOKEN (ACEFILE STYLE) -->
+            <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px;">
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span style="font-weight: 600; font-size: 12px; color: var(--accent-green);">Option 1: Connect via Rclone Token (Acefile Style)</span>
+                <span style="font-size: 10px; color: var(--accent-green); background: rgba(16, 185, 129, 0.12); padding: 2px 6px; border-radius: 3px; font-weight: 600;">Recommended - No Cloud Console Needed</span>
+              </div>
+              <p style="font-size: 11px; color: var(--text-muted); line-height: 1.45; margin: 0;">
+                Connect Google Drive instantly without creating your own Google Cloud Project or dealing with Test Users. Run this command on your computer terminal:
+              </p>
+              <div style="background: rgba(0, 0, 0, 0.35); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 6px 10px; display: flex; align-items: center; justify-content: space-between;">
+                <code style="font-family: var(--font-mono); font-size: 11px; color: #38bdf8;">rclone authorize "drive"</code>
+                <button
+                  class="btn btn-secondary"
+                  style="padding: 2px 8px; font-size: 10px;"
+                  onclick={() => copyRedirectURIToClipboard('rclone authorize "drive"')}
+                >
+                  Copy Command
+                </button>
+              </div>
+              <p style="font-size: 10.5px; color: var(--text-dim); line-height: 1.4; margin: 0;">
+                Log in when your browser opens, then copy and paste the generated JSON token (or the token line from your <code>rclone.conf</code>) below:
+              </p>
+              <div style="display: flex; flex-direction: column; gap: 6px;">
+                <textarea
+                  bind:value={rcloneTokenInput}
+                  rows="3"
+                  placeholder={`Paste token JSON here, e.g.: {"access_token":"ya29...","token_type":"Bearer","refresh_token":"1//0g...","expiry":"..."}`}
+                  style="padding: 6px 8px; font-size: 11px; font-family: var(--font-mono); resize: vertical; width: 100%; box-sizing: border-box;"
+                ></textarea>
+                <div style="display: flex; justify-content: flex-end;">
+                  <button
+                    class="btn btn-primary"
+                    disabled={!rcloneTokenInput.trim() || isImportingRcloneToken}
+                    onclick={importRcloneToken}
+                    style="font-size: 11px; padding: 5px 16px; background: #10b981;"
+                  >
+                    {isImportingRcloneToken ? 'Importing Token...' : 'Import Rclone Token'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- METHOD 2: CUSTOM GOOGLE CLOUD OAUTH 2.0 APP -->
             <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px;">
               <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-                <span style="font-size: 11px; font-weight: 600; color: #10b981;">Authorized Redirect URI (Wajib di Google Cloud Console):</span>
+                <span style="font-size: 11px; font-weight: 600; color: #10b981;">Authorized Redirect URI (Required in Google Cloud Console):</span>
                 <button
                   class="btn btn-secondary"
                   onclick={() => copyRedirectURIToClipboard(oauthRedirectURI || `http://localhost:${window.location.port || '8099'}/api/gdrive/oauth/callback`)}
@@ -3499,13 +3575,13 @@
                 {oauthRedirectURI || `http://localhost:${window.location.port || '8099'}/api/gdrive/oauth/callback`}
               </code>
               <span style="font-size: 9.5px; color: var(--text-dim); display: block; margin-top: 5px; line-height: 1.35;">
-                Catatan: Google menolak IP lokal/LAN (seperti 192.168.x.x) dengan Error 400. GDDL otomatis mengarahkan callback ke localhost.
+                Note: Google rejects private/LAN IPs (e.g. 192.168.x.x) with Error 400. GDDL automatically routes OAuth callbacks through localhost.
               </span>
             </div>
 
             <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px;">
               <div style="display: flex; align-items: center; justify-content: space-between;">
-                <span style="font-weight: 600; font-size: 12px; color: var(--accent-blue);">Google Cloud OAuth 2.0 Credentials</span>
+                <span style="font-weight: 600; font-size: 12px; color: var(--accent-blue);">Option 2: Custom Google Cloud OAuth 2.0 App</span>
                 <span style="font-size: 10px; color: var(--text-dim); background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 3px;">Full Drive Access</span>
               </div>
 
@@ -3533,21 +3609,21 @@
               </div>
 
               <details style="font-size: 10.5px; color: var(--text-muted); margin-top: 2px;">
-                <summary style="cursor: pointer; color: var(--text-dim); font-size: 10px;">Pengaturan Lanjutan: Custom Redirect URI Override (Opsional)</summary>
+                <summary style="cursor: pointer; color: var(--text-dim); font-size: 10px;">Advanced Settings: Custom Redirect URI Override (Optional)</summary>
                 <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 4px;">
                   <input
                     type="text"
                     bind:value={oauthRedirectURIOverride}
-                    placeholder="Kosongkan jika default (auto localhost:[port])"
+                    placeholder="Leave blank for default (auto localhost:[port])"
                     style="padding: 5px 8px; font-size: 11px; font-family: var(--font-mono);"
                   />
-                  <span style="font-size: 9.5px; color: var(--text-dim);">Isi hanya jika menggunakan domain HTTPS publik sendiri, Cloudflare Tunnel, atau custom reverse proxy.</span>
+                  <span style="font-size: 9.5px; color: var(--text-dim);">Only fill this if using your own public HTTPS domain, Cloudflare Tunnel, or a custom reverse proxy.</span>
                 </div>
               </details>
 
               <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-top: 4px; font-size: 11px; color: var(--text-main);">
                 <input type="checkbox" bind:checked={oauthAutoBypass} style="accent-color: var(--accent-blue);" />
-                <span>Otomatis bypass limit kuota 24 jam Google Drive (Make a copy ke <code>ggdl_temp</code> &amp; hapus otomatis)</span>
+                <span>Automatically bypass Google Drive 24-hour quota limits (Make a copy to <code>ggdl_temp</code> &amp; auto-delete)</span>
               </label>
 
               <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px;">
@@ -3571,32 +3647,34 @@
 
               <!-- Quick Setup Help Accordion -->
               <details style="font-size: 10.5px; color: var(--text-muted); border-top: 1px dashed var(--border-subtle); padding-top: 6px; margin-top: 2px;">
-                <summary style="cursor: pointer; color: var(--accent-blue); font-weight: 500;">Panduan 1 Menit: Cara Membuat Client ID &amp; Secret Gratis</summary>
+                <summary style="cursor: pointer; color: var(--accent-blue); font-weight: 500;">1-Minute Quick Setup Guide: How to Create Free Client ID &amp; Secret</summary>
                 <ol style="margin: 6px 0 0 0; padding-left: 18px; line-height: 1.5; color: var(--text-dim);">
-                  <li>Buka <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" style="color: var(--accent-blue);">Google Cloud Console</a> &gt; buat project baru jika belum ada.</li>
-                  <li>Di menu <strong>Enabled APIs &amp; Services</strong>, cari dan aktifkan <strong>Google Drive API</strong>.</li>
-                  <li>Di <strong>OAuth consent screen</strong>, pilih <em>External</em> &gt; isi nama app (misal <em>GDDL</em>) &gt; tambahkan email Anda sebagai Test User.</li>
-                  <li>Di menu <strong>Credentials</strong> &gt; <em>Create Credentials</em> &gt; pilih <strong>OAuth client ID</strong> &gt; Application type: <strong>Web application</strong>.</li>
-                  <li>Di bagian <strong>Authorized redirect URIs</strong>, tambahkan:<br/><code style="color: var(--accent-green); background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px;">{oauthRedirectURI || `http://localhost:${window.location.port || '8099'}/api/gdrive/oauth/callback`}</code></li>
-                  <li>Salin Client ID dan Client Secret ke form di atas, lalu klik <strong>Connect Google Drive</strong>.</li>
+                  <li>Open <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" style="color: var(--accent-blue);">Google Cloud Console</a> &gt; create a new project if you haven't already.</li>
+                  <li>Under <strong>Enabled APIs &amp; Services</strong>, search for and enable <strong>Google Drive API</strong>.</li>
+                  <li>Under <strong>OAuth consent screen</strong>, select <em>External</em> &gt; enter app name (e.g. <em>GDDL</em>) &gt; add your email under Test Users.
+                    <br/><strong style="color: #10b981;">Tip:</strong> Click "Publish App" to set Publishing status to <em>In production</em> so any Google account can log in without manual Test User registration!
+                  </li>
+                  <li>Under <strong>Credentials</strong> &gt; <em>Create Credentials</em> &gt; select <strong>OAuth client ID</strong> &gt; Application type: <strong>Web application</strong>.</li>
+                  <li>Under <strong>Authorized redirect URIs</strong>, add:<br/><code style="color: var(--accent-green); background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px;">{oauthRedirectURI || `http://localhost:${window.location.port || '8099'}/api/gdrive/oauth/callback`}</code></li>
+                  <li>Copy the Client ID and Client Secret into the form above, then click <strong>Connect Google Drive</strong>.</li>
                 </ol>
               </details>
             </div>
 
-            <!-- Manual Callback / Rclone Style Box -->
+            <!-- Manual Callback / Remote Host Fallback Box -->
             <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px;">
               <div style="display: flex; align-items: center; justify-content: space-between;">
-                <span style="font-weight: 600; font-size: 11px; color: var(--text-main);">Manual Authorization / Remote Host (Rclone style)</span>
+                <span style="font-weight: 600; font-size: 11px; color: var(--text-main);">Manual Authorization / Remote Host (Callback URL Fallback)</span>
                 <span style="font-size: 9.5px; color: var(--text-dim);">Fallback Input</span>
               </div>
               <span style="font-size: 10px; color: var(--text-muted); line-height: 1.4;">
-                Jika Google login berhasil di browser atau Anda membuka GDDL dari perangkat lain di LAN (misal HP/tablet), salin URL dari address bar browser setelah approve login dan tempel di bawah:
+                If Google login succeeded in your browser or you are accessing GDDL from another device on your LAN (e.g. phone/tablet), copy the URL from your browser address bar after approving login and paste below:
               </span>
               <div style="display: flex; gap: 6px;">
                 <input
                   type="text"
                   bind:value={oauthManualCode}
-                  placeholder={`Tempel URL callback lengkap misal: ${oauthRedirectURI || 'http://localhost:8099/api/gdrive/oauth/callback'}?code=... atau kode 4/0A...`}
+                  placeholder={`Paste full callback URL e.g. ${oauthRedirectURI || 'http://localhost:8099/api/gdrive/oauth/callback'}?code=... or authorization code 4/0A...`}
                   style="flex: 1; padding: 5px 8px; font-size: 11px; font-family: var(--font-mono);"
                 />
                 <button
@@ -3625,7 +3703,7 @@
             </div>
 
             <span class="form-hint" style="margin-top: 0.5rem; margin-bottom: 0.75rem;">
-              Metode cookie legacy: Menambahkan cookie Google Drive secara manual. Jika sebuah akun terkena limit 24 jam, GDDL otomatis beralih ke akun berikutnya.
+              Legacy cookie pool method: Add Google Drive cookies manually. If an account hits Google's 24-hour quota limit, GDDL automatically switches to the next account.
             </span>
 
             {#if cookieError}
@@ -3679,13 +3757,13 @@
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                     <polyline points="20 6 9 17 4 12"></polyline>
                   </svg>
-                  <span>Berhasil mengekstrak cookie dari cURL / Request Headers!</span>
+                  <span>Successfully extracted cookie from cURL / Request Headers!</span>
                 </div>
               {/if}
 
               <div style="display: grid; grid-template-columns: 100px 1fr; gap: 8px; align-items: flex-start;">
                 <span style="font-size: 11px; color: var(--text-muted); padding-top: 5px;">Account Label:</span>
-                <input type="text" bind:value={newCookieLabel} placeholder="e.g. Gmail Utama, Gmail 2..." style="padding: 4px 8px; font-size: 12px;" />
+                <input type="text" bind:value={newCookieLabel} placeholder="e.g. Primary Account, Secondary Account..." style="padding: 4px 8px; font-size: 12px;" />
 
                 <span style="font-size: 11px; color: var(--text-muted); padding-top: 5px;">Cookie String:</span>
                 <div style="display: flex; flex-direction: column; gap: 6px;">
@@ -3694,7 +3772,7 @@
                     oninput={(e) => handleCookieInput(e.target.value)}
                     onpaste={(e) => setTimeout(() => handleCookieInput(newCookieValue), 15)}
                     rows="3"
-                    placeholder="Tempel string Cookie atau langsung paste cURL dari DevTools (F12 > Network > Klik kanan > Copy as cURL)"
+                    placeholder="Paste Cookie string or raw cURL from DevTools (F12 > Network > Right click > Copy as cURL)"
                     style="padding: 6px 8px; font-size: 11px; font-family: var(--font-mono); resize: vertical; width: 100%; box-sizing: border-box;"
                   ></textarea>
 
@@ -3716,7 +3794,7 @@
               </div>
 
               <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
-                <span style="font-size: 10px; color: var(--text-dim);">Dukungan format: cURL (bash/cmd), raw headers, JSON</span>
+                <span style="font-size: 10px; color: var(--text-dim);">Supported formats: cURL (bash/cmd), raw headers, JSON</span>
                 <button class="btn btn-primary" disabled={!newCookieValue.trim() || isAddingCookie} onclick={addCookieToPool} style="font-size: 11px; padding: 4px 12px;">
                   {isAddingCookie ? 'Adding...' : 'Add Account to Pool'}
                 </button>
@@ -3799,6 +3877,43 @@
                 <div class="hint-header">Aggressive Concurrency (5 Workers)</div>
                 <p>High probability of Google Drive IP-level connection throttling or temporary 24-hour file lockouts unless logged in with valid cookies. Discord CDN may experience connection queueing.</p>
               {/if}
+            </div>
+          </div>
+
+          <!-- Multi-Chunk Parallel Segmented Downloader Section -->
+          <div class="form-group" style="margin-top: 1rem;">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+              <span class="form-title">Parallel Chunks per Download (IDM-Style):</span>
+              {#if chunksPerDownload <= 1}
+                <span class="concurrency-badge badge-safe">Single Stream (10 MB/s Cap)</span>
+              {:else if chunksPerDownload === 2}
+                <span class="concurrency-badge badge-optimal">Dual Stream (~20 MB/s)</span>
+              {:else if chunksPerDownload === 4}
+                <span class="concurrency-badge badge-safe">Recommended (4 Chunks)</span>
+              {:else if chunksPerDownload === 8}
+                <span class="concurrency-badge badge-fast">High Speed (8 Chunks)</span>
+              {:else}
+                <span class="concurrency-badge badge-aggressive">Extreme (16 Chunks)</span>
+              {/if}
+            </div>
+
+            <div style="display: flex; align-items: center; gap: 10px; margin-top: 6px;">
+              <select
+                bind:value={chunksPerDownload}
+                style="padding: 5px 8px; border-radius: 4px; background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border-color); font-size: 12px; width: 260px;"
+              >
+                <option value={1}>1 Chunk (Single Stream - 10 MB/s Cap)</option>
+                <option value={2}>2 Chunks (Dual Stream - Up to ~20 MB/s)</option>
+                <option value={4}>4 Chunks (Recommended - Fast &amp; Balanced)</option>
+                <option value={8}>8 Chunks (High Speed - Up to ~80 MB/s)</option>
+                <option value={16}>16 Chunks (Extreme - Maximum Bandwidth)</option>
+              </select>
+              <span class="form-hint" style="margin: 0;">Parallel HTTP Range connections per file (&gt;10 MB).</span>
+            </div>
+
+            <div class="concurrency-hint-card hint-optimal" style="margin-top: 8px;">
+              <div class="hint-header">Google Drive 10 MB/s Speed Cap Bypass</div>
+              <p>Google Drive throttles individual TCP streams to ~10 MB/s. Dividing files larger than 10 MB into multiple parallel byte range segments bypasses this single-stream bottleneck (just like Internet Download Manager) without triggering Google quota restrictions.</p>
             </div>
           </div>
 

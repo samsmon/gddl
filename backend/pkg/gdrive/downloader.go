@@ -106,11 +106,13 @@ type CookieExhaustedNotifier func(cookieID string)
 
 type Downloader struct {
 	client                  *http.Client
+	chunkedDownloader       *ChunkedDownloader
 	cookieLock              sync.RWMutex
 	googleCookie            string
 	cookieProvider          CookieProvider
 	cookieExhaustedNotifier CookieExhaustedNotifier
 	bypassManager           *BypassManager
+	chunksPerDownload       int
 }
 
 func NewDownloader() (*Downloader, error) {
@@ -142,27 +144,31 @@ func NewDownloader() (*Downloader, error) {
 		WriteBufferSize:       1024 * 1024,
 	}
 
-	return &Downloader{
-		client: &http.Client{
-			Jar:       jar,
-			Transport: transport,
-			Timeout:   0,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 15 {
-					return errors.New("stopped after 15 redirects")
+	client := &http.Client{
+		Jar:       jar,
+		Transport: transport,
+		Timeout:   0,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 15 {
+				return errors.New("stopped after 15 redirects")
+			}
+			if len(via) > 0 {
+				prev := via[len(via)-1]
+				if cookie := prev.Header.Get("Cookie"); cookie != "" {
+					req.Header.Set("Cookie", cookie)
 				}
-				if len(via) > 0 {
-					prev := via[len(via)-1]
-					if cookie := prev.Header.Get("Cookie"); cookie != "" {
-						req.Header.Set("Cookie", cookie)
-					}
-					if ua := prev.Header.Get("User-Agent"); ua != "" {
-						req.Header.Set("User-Agent", ua)
-					}
+				if ua := prev.Header.Get("User-Agent"); ua != "" {
+					req.Header.Set("User-Agent", ua)
 				}
-				return nil
-			},
+			}
+			return nil
 		},
+	}
+
+	return &Downloader{
+		client:            client,
+		chunkedDownloader: NewChunkedDownloader(client),
+		chunksPerDownload: 4,
 	}, nil
 }
 
@@ -228,10 +234,42 @@ func (d *Downloader) GetGoogleCookie() string {
 	return d.googleCookie
 }
 
+// SetChunksPerDownload configures parallel download streams per file.
+func (d *Downloader) SetChunksPerDownload(n int) {
+	if d == nil {
+		return
+	}
+	d.cookieLock.Lock()
+	defer d.cookieLock.Unlock()
+	if n <= 0 {
+		n = 4
+	}
+	d.chunksPerDownload = n
+	if d.bypassManager != nil {
+		d.bypassManager.SetChunksPerDownload(n)
+	}
+}
+
+// GetChunksPerDownload returns the configured parallel download streams.
+func (d *Downloader) GetChunksPerDownload() int {
+	if d == nil {
+		return 4
+	}
+	d.cookieLock.RLock()
+	defer d.cookieLock.RUnlock()
+	if d.chunksPerDownload <= 0 {
+		return 4
+	}
+	return d.chunksPerDownload
+}
+
 func (d *Downloader) SetBypassManager(bm *BypassManager) {
 	d.cookieLock.Lock()
 	defer d.cookieLock.Unlock()
 	d.bypassManager = bm
+	if bm != nil && d.chunksPerDownload > 0 {
+		bm.SetChunksPerDownload(d.chunksPerDownload)
+	}
 }
 
 func (d *Downloader) GetBypassManager() *BypassManager {
@@ -507,6 +545,52 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 		totalSize := finalResp.ContentLength
 		if totalSize < 0 {
 			totalSize = 0
+		}
+
+		chunks := d.GetChunksPerDownload()
+		downloadURL := ""
+		if finalResp.Request != nil && finalResp.Request.URL != nil {
+			downloadURL = finalResp.Request.URL.String()
+		}
+
+		var existingSize int64 = 0
+		if fi, statErr := os.Stat(destPath); statErr == nil {
+			existingSize = fi.Size()
+		}
+
+		if existingSize == 0 && totalSize > 10*1024*1024 && chunks > 1 && downloadURL != "" {
+			finalResp.Body.Close()
+			logger.Infof("Download", "Downloading '%s' (%d bytes) with %d parallel chunk streams", filename, totalSize, chunks)
+
+			headers := http.Header{}
+			headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+			if currentCookie != "" {
+				headers.Set("Cookie", currentCookie)
+			}
+
+			copied, err := d.chunkedDownloader.DownloadSegmented(
+				ctx,
+				destPath,
+				downloadURL,
+				totalSize,
+				headers,
+				chunks,
+				onProgress,
+			)
+			if err != nil {
+				if ctx.Err() == nil && !strings.Contains(err.Error(), "context canceled") {
+					logger.Errorf("Download", "Parallel download failed for '%s': %v", filename, err)
+				}
+				return filename, copied, err
+			}
+
+			if integrityErr := VerifyFileIntegrity(destPath, totalSize); integrityErr != nil {
+				logger.Errorf("Integrity", "Integrity failure on '%s': %v", filename, integrityErr)
+				return filename, copied, fmt.Errorf("CORRUPT: %w", integrityErr)
+			}
+
+			logger.Successf("Download", "Saved '%s' successfully (%d bytes) via %d streams", filename, copied, chunks)
+			return filename, copied, nil
 		}
 
 		var out *os.File
