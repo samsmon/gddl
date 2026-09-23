@@ -1965,6 +1965,9 @@
                           {/if}
                         </button>
                       {/if}
+                      {#if item.url && (item.url.includes('cdn.discordapp.com') || item.url.includes('media.discordapp.net'))}
+                        <span class="discord-tag" title="Discord CDN Attachment">DISCORD</span>
+                      {/if}
                       <span class="file-text">{item.filename || 'Resolving name...'}</span>
                     </div>
                   </td>
@@ -2533,7 +2536,7 @@
     <div class="modal-overlay" role="presentation" onclick={() => showAddModal = false} onkeydown={(e) => e.key === 'Escape' && (showAddModal = false)}>
       <div class="modal-window" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
         <div class="modal-header">
-          <span>Add Google Drive Links</span>
+          <span>Add Google Drive & Discord CDN Links</span>
           <button class="modal-close" aria-label="Close" onclick={() => showAddModal = false}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -2544,12 +2547,12 @@
 
         <div class="modal-body">
           <label class="form-group">
-            <span class="form-title">Enter Google Drive URLs (one per line):</span>
+            <span class="form-title">Enter Google Drive or Discord CDN URLs (one per line):</span>
             <textarea
               bind:value={addLinksInput}
               oninput={handleLinksInput}
               rows="5"
-              placeholder="https://drive.google.com/file/d/1A2B3C.../view&#10;https://drive.google.com/drive/folders/1sSPph9ml0...&#10;https://drive.usercontent.google.com/download?id=13g1RiKb..."
+              placeholder="https://drive.google.com/file/d/1A2B3C.../view&#10;https://drive.google.com/drive/folders/1sSPph9ml0...&#10;https://cdn.discordapp.com/attachments/141.../154.../file.rar?ex=...&#10;https://media.discordapp.net/attachments/..."
             ></textarea>
           </label>
 
@@ -3639,6 +3642,19 @@
   .status-corrupted { background: rgba(248, 81, 73, 0.25); color: var(--accent-red); border: 1px solid var(--accent-red); }
   .status-failed { background: rgba(248, 81, 73, 0.18); color: var(--accent-red); }
   .status-cancelled { background: var(--border-subtle); color: var(--text-dim); }
+  .discord-tag {
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.35rem;
+    background: rgba(88, 101, 242, 0.2);
+    color: #5865F2;
+    border: 1px solid rgba(88, 101, 242, 0.4);
+    border-radius: 3px;
+    margin-right: 0.35rem;
+    flex-shrink: 0;
+    vertical-align: middle;
+  }
 
   /* Folder Preview in Add Modal */
   .folder-preview-card {

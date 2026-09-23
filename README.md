@@ -25,6 +25,9 @@ A high-performance, self-hosted desktop download manager for Google Drive with a
 
 ## Core Features
 
+- **Google Drive & Discord CDN Support**: Download both Google Drive files/folders and Discord CDN attachments (`cdn.discordapp.com` and `media.discordapp.net`).
+- **Concurrent Discord Downloads with Rate-Limit Protection**: Download multiple Discord files in parallel with adaptive exponential backoff, request jitter pacing, realistic browser headers, and HTTP Range partial-content resumption against Cloudflare HTTP 429 throttling.
+- **Discord Expiry Detection**: Automatically checks the Discord CDN `ex` timestamp and alerts if an attachment link has expired before wasting bandwidth.
 - **Concurrent Multi-Worker Engine**: Configurable parallel workers (1 to 5) powered by lightweight Go goroutines.
 - **Bypass Virus Scan Prompts**: Automatically extracts Google Drive confirmation tokens for large files (>100MB).
 - **Smart Folder & ZIP Compression**: Paste any public or private Google Drive folder link. Choose between downloading as a subfolder or compressing all folder contents locally into a verified `.zip` archive with real-time compression progress.

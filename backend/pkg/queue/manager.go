@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gdrive-downloader/pkg/discord"
 	"gdrive-downloader/pkg/gdrive"
 	"gdrive-downloader/pkg/logger"
 )
@@ -127,10 +128,11 @@ type Manager struct {
 	subscribers    map[chan []DownloadItem]bool
 	subMu          sync.RWMutex
 	notifyChan     chan struct{}
-	downloader     *gdrive.Downloader
-	MaxConcurrency int
-	TargetFolder   string
-	dataFile       string
+	downloader        *gdrive.Downloader
+	discordDownloader *discord.Downloader
+	MaxConcurrency    int
+	TargetFolder      string
+	dataFile          string
 }
 
 func NewManager(defaultFolder string, concurrency int, dataFile ...string) (*Manager, error) {
@@ -138,6 +140,8 @@ func NewManager(defaultFolder string, concurrency int, dataFile ...string) (*Man
 	if err != nil {
 		return nil, err
 	}
+
+	discordDl := discord.NewDownloader()
 
 	if concurrency <= 0 {
 		concurrency = 2
@@ -149,15 +153,16 @@ func NewManager(defaultFolder string, concurrency int, dataFile ...string) (*Man
 	}
 
 	m := &Manager{
-		items:          make(map[string]*DownloadItem),
-		order:          make([]string, 0),
-		queueChan:      make(chan *DownloadItem, 2000),
-		subscribers:    make(map[chan []DownloadItem]bool),
-		notifyChan:     make(chan struct{}, 1),
-		downloader:     dl,
-		MaxConcurrency: concurrency,
-		TargetFolder:   defaultFolder,
-		dataFile:       df,
+		items:             make(map[string]*DownloadItem),
+		order:             make([]string, 0),
+		queueChan:         make(chan *DownloadItem, 2000),
+		subscribers:       make(map[chan []DownloadItem]bool),
+		notifyChan:        make(chan struct{}, 1),
+		downloader:        dl,
+		discordDownloader: discordDl,
+		MaxConcurrency:    concurrency,
+		TargetFolder:      defaultFolder,
+		dataFile:          df,
 	}
 
 	m.loadFromDisk()
@@ -366,21 +371,42 @@ func (m *Manager) worker() {
 			desiredName = item.Filename
 		}
 
-		filename, _, err := m.downloader.Download(
-			ctx,
-			item.FileID,
-			item.TargetFolder,
-			func(downloadedBytes, totalBytes, speed int64, etaSeconds int64, percentage float64) {
-				item.mu.Lock()
-				item.DownloadedBytes = downloadedBytes
-				item.TotalBytes = totalBytes
-				item.Speed = speed
-				item.ETASeconds = etaSeconds
-				item.Percentage = percentage
-				item.mu.Unlock()
-			},
-			desiredName,
-		)
+		var filename string
+		var err error
+
+		if discord.IsDiscordURL(item.URL) {
+			filename, _, err = m.discordDownloader.Download(
+				ctx,
+				item.URL,
+				item.TargetFolder,
+				func(downloadedBytes, totalBytes, speed int64, etaSeconds int64, percentage float64) {
+					item.mu.Lock()
+					item.DownloadedBytes = downloadedBytes
+					item.TotalBytes = totalBytes
+					item.Speed = speed
+					item.ETASeconds = etaSeconds
+					item.Percentage = percentage
+					item.mu.Unlock()
+				},
+				desiredName,
+			)
+		} else {
+			filename, _, err = m.downloader.Download(
+				ctx,
+				item.FileID,
+				item.TargetFolder,
+				func(downloadedBytes, totalBytes, speed int64, etaSeconds int64, percentage float64) {
+					item.mu.Lock()
+					item.DownloadedBytes = downloadedBytes
+					item.TotalBytes = totalBytes
+					item.Speed = speed
+					item.ETASeconds = etaSeconds
+					item.Percentage = percentage
+					item.mu.Unlock()
+				},
+				desiredName,
+			)
+		}
 
 		item.mu.Lock()
 		item.cancelFunc = nil
@@ -723,7 +749,30 @@ func (m *Manager) PrecheckDownloads(rawURLs []string, targetFolder string, zipMo
 		var title string
 		var expectedFilename string
 
-		if folderID, isF := gdrive.IsFolderURL(rawURL); isF {
+		if discord.IsDiscordURL(rawURL) {
+			isFolder = false
+			dFilename, _, isExp, dErr := discord.ExtractDiscordFileInfo(rawURL)
+			if dErr != nil {
+				continue
+			}
+			fileID = dFilename
+			if isExp {
+				title = dFilename + " (EXPIRED)"
+			} else {
+				title = dFilename
+			}
+			expectedFilename = dFilename
+
+			// If not expired, try fast HEAD for exact Content-Disposition or size
+			if !isExp {
+				fn, _, headErr := m.discordDownloader.GetFileInfo(ctx, rawURL)
+				if headErr == nil && fn != "" {
+					expectedFilename = fn
+					title = fn
+					fileID = fn
+				}
+			}
+		} else if folderID, isF := gdrive.IsFolderURL(rawURL); isF {
 			isFolder = true
 			fileID = folderID
 
@@ -1081,10 +1130,45 @@ func (m *Manager) AddWithResolutions(rawURLs []string, targetFolder string, zipM
 			continue
 		}
 
-		// Single file link
-		fileID, err := gdrive.ExtractFileID(rawURL)
-		if err != nil {
-			continue
+		// Check if Discord URL
+		isDiscord := discord.IsDiscordURL(rawURL)
+		var fileID string
+		var fn string
+
+		if isDiscord {
+			dFn, _, isExp, dErr := discord.ExtractDiscordFileInfo(rawURL)
+			if dErr != nil {
+				continue
+			}
+			fileID = dFn
+			fn = dFn
+			if isExp {
+				id := fmt.Sprintf("%d_discord_%s", time.Now().UnixNano(), fileID)
+				item := &DownloadItem{
+					ID:           id,
+					URL:          rawURL,
+					FileID:       fileID,
+					Filename:     fn,
+					TargetFolder: targetFolder,
+					Status:       StatusFailed,
+					Error:        "Discord CDN link has expired. Please copy a new link from Discord.",
+					CreatedAt:    now,
+					LastTryAt:    now,
+				}
+				m.mu.Lock()
+				m.items[id] = item
+				m.order = append(m.order, id)
+				added = append(added, item)
+				m.mu.Unlock()
+				continue
+			}
+		} else {
+			// Single Google Drive file link
+			fID, err := gdrive.ExtractFileID(rawURL)
+			if err != nil {
+				continue
+			}
+			fileID = fID
 		}
 
 		action := ""
@@ -1105,13 +1189,24 @@ func (m *Manager) AddWithResolutions(rawURLs []string, targetFolder string, zipM
 		}
 		m.mu.RUnlock()
 
-		fn := fmt.Sprintf("File %s", fileID)
-		if existingItem != nil && existingItem.Filename != "" && !strings.HasPrefix(existingItem.Filename, "File ") {
-			fn = existingItem.Filename
+		if !isDiscord {
+			fn = fmt.Sprintf("File %s", fileID)
+			if existingItem != nil && existingItem.Filename != "" && !strings.HasPrefix(existingItem.Filename, "File ") {
+				fn = existingItem.Filename
+			} else {
+				realFn, _, err := m.downloader.GetFileInfo(context.Background(), fileID)
+				if err == nil && realFn != "" {
+					fn = realFn
+				}
+			}
 		} else {
-			realFn, _, err := m.downloader.GetFileInfo(context.Background(), fileID)
-			if err == nil && realFn != "" {
-				fn = realFn
+			if existingItem != nil && existingItem.Filename != "" {
+				fn = existingItem.Filename
+			} else {
+				realFn, _, err := m.discordDownloader.GetFileInfo(context.Background(), rawURL)
+				if err == nil && realFn != "" {
+					fn = realFn
+				}
 			}
 		}
 
@@ -1134,7 +1229,16 @@ func (m *Manager) AddWithResolutions(rawURLs []string, targetFolder string, zipM
 					id = existingItem.ID
 				}
 
-				realFn, remoteSize, err := m.downloader.GetFileInfo(context.Background(), fileID)
+				var realFn string
+				var remoteSize int64
+				var err error
+
+				if isDiscord {
+					realFn, remoteSize, err = m.discordDownloader.GetFileInfo(context.Background(), rawURL)
+				} else {
+					realFn, remoteSize, err = m.downloader.GetFileInfo(context.Background(), fileID)
+				}
+
 				if err == nil && realFn != "" {
 					fn = realFn
 				}
@@ -1314,6 +1418,9 @@ func (m *Manager) Restart(id string) error {
 	// Clean up staging directory so restart is completely clean from 0
 	stagingDir := filepath.Join(targetFolder, fmt.Sprintf(".tmp_gdrive_%s", itemId))
 	_ = os.RemoveAll(stagingDir)
+	if item.Filename != "" {
+		_ = os.Remove(filepath.Join(targetFolder, item.Filename+".part"))
+	}
 
 	logger.Infof("Queue", "Restarted download '%s' from beginning (staging cleared)", item.Filename)
 
@@ -1380,6 +1487,7 @@ func (m *Manager) Delete(id string, deleteFile bool) error {
 			if filename != "" && targetFolder != "" {
 				filePath := filepath.Join(targetFolder, filename)
 				_ = os.Remove(filePath)
+				_ = os.Remove(filePath + ".part")
 			}
 		}
 	}
