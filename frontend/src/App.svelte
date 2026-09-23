@@ -458,10 +458,71 @@
   let cookieError = $state('');
   let cookieMessage = $state('');
 
+  let wasCookieExtracted = $state(false);
+
+  function parseCookieInput(raw) {
+    if (!raw || typeof raw !== 'string') return '';
+    let str = raw.trim();
+    if (!str) return '';
+
+    // 1. JSON array of cookies (e.g. Cookie-Editor / EditThisCookie export)
+    if ((str.startsWith('[') && str.endsWith(']')) || (str.startsWith('{') && str.endsWith('}'))) {
+      try {
+        const parsed = JSON.parse(str);
+        if (Array.isArray(parsed)) {
+          const parts = [];
+          for (const item of parsed) {
+            if (item && item.name && item.value !== undefined) {
+              parts.push(`${item.name}=${item.value}`);
+            }
+          }
+          if (parts.length > 0) return parts.join('; ');
+        } else if (parsed && typeof parsed === 'object') {
+          if (parsed.cookie) return String(parsed.cookie).trim();
+          if (parsed.Cookie) return String(parsed.Cookie).trim();
+          const parts = [];
+          for (const [k, v] of Object.entries(parsed)) {
+            if (typeof v === 'string') parts.push(`${k}=${v}`);
+          }
+          if (parts.length > 0) return parts.join('; ');
+        }
+      } catch (_) {}
+    }
+
+    // 2. cURL (-H 'cookie: ...' or --header "Cookie: ...")
+    const curlMatch = str.match(/(?:-H|--header)\s+[\$]?[\^'"]+(?:[Cc]ookie:\s*)([^\r\n'"\^]+)/i);
+    if (curlMatch && curlMatch[1]) return curlMatch[1].trim();
+
+    // 3. PowerShell Invoke-WebRequest headers
+    const psMatch = str.match(/["']cookie["']\s*=\s*["']([^"']+)["']/i);
+    if (psMatch && psMatch[1]) return psMatch[1].trim();
+
+    // 4. Fetch headers
+    const fetchMatch = str.match(/["']cookie["']:\s*["']([^"']+)["']/i);
+    if (fetchMatch && fetchMatch[1]) return fetchMatch[1].trim();
+
+    // 5. Raw HTTP Request Headers line: Cookie: ...
+    const headerMatch = str.match(/(?:^|\n)\s*cookie:\s*([^\r\n]+)/i);
+    if (headerMatch && headerMatch[1]) return headerMatch[1].trim();
+
+    return str;
+  }
+
+  function handleCookieInput(val) {
+    const cleaned = parseCookieInput(val);
+    if (cleaned && cleaned !== val) {
+      newCookieValue = cleaned;
+      wasCookieExtracted = true;
+      setTimeout(() => { wasCookieExtracted = false; }, 4000);
+    } else {
+      newCookieValue = val;
+    }
+  }
+
   // Validate presence of core cookies: SID, HSID, SSID
   let cookieValidation = $derived.by(() => {
     if (!newCookieValue.trim()) return null;
-    const val = newCookieValue;
+    const val = parseCookieInput(newCookieValue);
     const hasSID = /(?:^|;\s*)SID=/.test(val);
     const hasHSID = /(?:^|;\s*)HSID=/.test(val);
     const hasSSID = /(?:^|;\s*)SSID=/.test(val);
@@ -488,7 +549,9 @@
   }
 
   async function addCookieToPool() {
-    if (!newCookieValue.trim()) return;
+    const rawVal = newCookieValue.trim();
+    if (!rawVal) return;
+    const cleaned = parseCookieInput(rawVal);
     isAddingCookie = true;
     cookieError = '';
     cookieMessage = '';
@@ -498,7 +561,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           label: newCookieLabel.trim(),
-          cookie: newCookieValue.trim()
+          cookie: cleaned
         })
       });
       if (!res.ok) {
@@ -507,6 +570,7 @@
       }
       newCookieLabel = '';
       newCookieValue = '';
+      wasCookieExtracted = false;
       cookieMessage = 'Account added to Cookie Pool successfully.';
       await fetchGoogleCookies();
       setTimeout(() => { cookieMessage = ''; }, 4000);
@@ -3206,8 +3270,36 @@
           {/if}
 
           <!-- Add Account Form -->
-          <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 8px;">
-            <span style="font-weight: 600; font-size: 12px; color: var(--accent-blue);">+ Add Google Account Cookie</span>
+          <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 10px;">
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+              <span style="font-weight: 600; font-size: 12px; color: var(--accent-blue);">+ Add Google Account Cookie</span>
+              <span style="font-size: 10px; color: var(--text-dim); background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 3px;">Auto-extracts from cURL</span>
+            </div>
+
+            <!-- Quick Guide: 1-Click Copy without manual search -->
+            <div style="background: rgba(88, 166, 255, 0.08); border: 1px solid rgba(88, 166, 255, 0.22); border-radius: 6px; padding: 8px 10px; font-size: 11px;">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+                <span style="font-weight: 600; color: var(--accent-blue);">Cara Tercepat Tanpa Cari Manual (Copy as cURL):</span>
+                <span style="font-size: 10px; color: var(--accent-green); font-weight: 600;">1-Klik Saja</span>
+              </div>
+              <ol style="margin: 0; padding-left: 18px; color: var(--text-muted); line-height: 1.5; font-size: 10.5px;">
+                <li>Buka <code style="color: var(--accent-blue);">drive.google.com</code> di browser &amp; tekan <strong>F12</strong> (DevTools).</li>
+                <li>Di tab <strong>Network</strong>, klik kanan pada request paling atas &gt; <strong>Copy</strong> &gt; pilih <strong>Copy as cURL (bash)</strong>.</li>
+                <li><strong>Langsung tempel (Ctrl+V)</strong> di kotak di bawah. GDDL otomatis menyaring &amp; mengekstrak <code>SID</code>, <code>HSID</code>, <code>SSID</code> seketika!</li>
+              </ol>
+              <div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(255, 255, 255, 0.1); font-size: 10px; color: var(--text-dim); line-height: 1.4;">
+                <strong style="color: #e3b341;">Kenapa tidak via Console?</strong> Cookie <code>SID</code>, <code>HSID</code>, dan <code>SSID</code> berstatus <em>HttpOnly</em>, sehingga oleh standar keamanan browser otomatis disembunyikan dari JavaScript Console (<code>document.cookie</code>) demi mencegah XSS. Metode <em>Copy as cURL</em> di atas adalah cara resmi yang 100% lengkap dan instan.
+              </div>
+            </div>
+
+            {#if wasCookieExtracted}
+              <div style="font-size: 11px; color: var(--accent-green); background: rgba(46,160,67,0.15); border: 1px solid rgba(46,160,67,0.3); border-radius: 4px; padding: 5px 8px; display: flex; align-items: center; gap: 6px;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+                <span>Berhasil mengekstrak cookie dari cURL / Request Headers!</span>
+              </div>
+            {/if}
 
             <div style="display: grid; grid-template-columns: 110px 1fr; gap: 8px; align-items: flex-start;">
               <span style="font-size: 11px; color: var(--text-muted); padding-top: 5px;">Account Label:</span>
@@ -3217,8 +3309,10 @@
               <div style="display: flex; flex-direction: column; gap: 6px;">
                 <textarea
                   bind:value={newCookieValue}
+                  oninput={(e) => handleCookieInput(e.target.value)}
+                  onpaste={(e) => setTimeout(() => handleCookieInput(newCookieValue), 15)}
                   rows="3"
-                  placeholder="Paste complete Cookie header string (contains SID, HSID, SSID)"
+                  placeholder="Tempel string Cookie atau langsung paste cURL dari DevTools (F12 > Network > Klik kanan > Copy as cURL)"
                   style="padding: 6px 8px; font-size: 11px; font-family: var(--font-mono); resize: vertical; width: 100%; box-sizing: border-box;"
                 ></textarea>
 
@@ -3236,9 +3330,9 @@
                     </div>
                     {#if !cookieValidation.valid}
                       <div style="font-size: 10px; color: var(--text-muted); line-height: 1.4; margin-top: 3px;">
-                        Google Drive requires all three cookies: <strong>SID</strong>, <strong>HSID</strong>, and <strong>SSID</strong>. If any are missing, Google will still treat requests as anonymous and hit quota.
+                        Google Drive requires all three cookies: <strong>SID</strong>, <strong>HSID</strong>, and <strong>SSID</strong>.
                         <br/>
-                        <strong>How to copy:</strong> Open Chrome DevTools (F12) on drive.google.com &gt; Network tab &gt; click any request &gt; Headers &gt; Request Headers &gt; right-click <code>Cookie</code> &gt; <em>Copy value</em>.
+                        <strong>Trik praktis:</strong> Di DevTools (F12) &gt; tab <strong>Network</strong> &gt; klik kanan request paling atas &gt; <strong>Copy</strong> &gt; <em>Copy as cURL (bash)</em> &gt; paste langsung ke kolom ini!
                       </div>
                     {/if}
                   </div>
@@ -3247,7 +3341,7 @@
             </div>
 
             <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
-              <span style="font-size: 10px; color: var(--text-dim);">DevTools (F12) &gt; Network &gt; Request Headers &gt; Cookie (Right click &gt; Copy value)</span>
+              <span style="font-size: 10px; color: var(--text-dim);">Dukungan format: cURL (bash/cmd), raw headers, JSON (Cookie-Editor), atau string cookie murni</span>
               <button class="btn btn-primary" disabled={!newCookieValue.trim() || isAddingCookie} onclick={addCookieToPool} style="font-size: 11px; padding: 4px 12px;">
                 {isAddingCookie ? 'Adding...' : 'Add Account to Pool'}
               </button>

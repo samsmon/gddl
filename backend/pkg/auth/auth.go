@@ -9,10 +9,54 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+var (
+	curlCookieRegex   = regexp.MustCompile(`(?i)(?:-H|--header)\s+[\$]?[\^'"]+(?:cookie:\s*)([^\r\n'"\^]+)`)
+	headerCookieRegex = regexp.MustCompile(`(?im)^\s*cookie:\s*([^\r\n]+)`)
+)
+
+func CleanCookieString(raw string) string {
+	str := strings.TrimSpace(raw)
+	if str == "" {
+		return ""
+	}
+
+	// 1. JSON (Cookie-Editor / EditThisCookie export)
+	if (strings.HasPrefix(str, "[") && strings.HasSuffix(str, "]")) || (strings.HasPrefix(str, "{") && strings.HasSuffix(str, "}")) {
+		var arr []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal([]byte(str), &arr); err == nil && len(arr) > 0 {
+			var parts []string
+			for _, item := range arr {
+				if item.Name != "" {
+					parts = append(parts, fmt.Sprintf("%s=%s", item.Name, item.Value))
+				}
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, "; ")
+			}
+		}
+	}
+
+	// 2. cURL (-H 'cookie: ...')
+	if m := curlCookieRegex.FindStringSubmatch(str); len(m) > 1 {
+		return strings.TrimSpace(m[1])
+	}
+
+	// 3. Raw headers (Cookie: ...)
+	if m := headerCookieRegex.FindStringSubmatch(str); len(m) > 1 {
+		return strings.TrimSpace(m[1])
+	}
+
+	return str
+}
 
 type CookieEntry struct {
 	ID             string     `json:"id"`
@@ -141,6 +185,7 @@ func (m *Manager) UpdateConfig(folder string, concurrency int, googleCookie stri
 		m.config.MaxConcurrency = concurrency
 	}
 	if googleCookie != "" {
+		googleCookie = CleanCookieString(googleCookie)
 		m.config.GoogleCookie = googleCookie
 		if len(m.config.GoogleCookies) == 0 {
 			m.config.GoogleCookies = []CookieEntry{
@@ -159,6 +204,7 @@ func (m *Manager) UpdateConfig(folder string, concurrency int, googleCookie stri
 }
 
 func (m *Manager) SetGoogleCookie(cookie string) error {
+	cookie = CleanCookieString(cookie)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.config.GoogleCookie = cookie
@@ -189,7 +235,7 @@ func (m *Manager) GetCookies() []CookieEntry {
 }
 
 func (m *Manager) AddCookie(label, cookie string) (CookieEntry, error) {
-	cookie = strings.TrimSpace(cookie)
+	cookie = CleanCookieString(cookie)
 	if cookie == "" {
 		return CookieEntry{}, fmt.Errorf("cookie cannot be empty")
 	}
