@@ -146,14 +146,72 @@ func NewDownloader() (*Downloader, error) {
 			Jar:       jar,
 			Transport: transport,
 			Timeout:   0,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 15 {
+					return errors.New("stopped after 15 redirects")
+				}
+				if len(via) > 0 {
+					prev := via[len(via)-1]
+					if cookie := prev.Header.Get("Cookie"); cookie != "" {
+						req.Header.Set("Cookie", cookie)
+					}
+					if ua := prev.Header.Get("User-Agent"); ua != "" {
+						req.Header.Set("User-Agent", ua)
+					}
+				}
+				return nil
+			},
 		},
 	}, nil
+}
+
+func (d *Downloader) populateCookieJar(cookieStr string) {
+	if cookieStr == "" || d.client == nil || d.client.Jar == nil {
+		return
+	}
+	rawCookies := strings.Split(cookieStr, ";")
+	var cookies []*http.Cookie
+	for _, raw := range rawCookies {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		parts := strings.SplitN(raw, "=", 2)
+		if len(parts) == 2 {
+			name := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			if name != "" {
+				cookies = append(cookies, &http.Cookie{
+					Name:   name,
+					Value:  val,
+					Path:   "/",
+					Domain: ".google.com",
+				})
+			}
+		}
+	}
+	if len(cookies) == 0 {
+		return
+	}
+	targets := []string{
+		"https://google.com",
+		"https://drive.google.com",
+		"https://drive.usercontent.google.com",
+		"https://docs.googleusercontent.com",
+		"https://googleusercontent.com",
+	}
+	for _, target := range targets {
+		if u, err := url.Parse(target); err == nil {
+			d.client.Jar.SetCookies(u, cookies)
+		}
+	}
 }
 
 func (d *Downloader) SetGoogleCookie(cookie string) {
 	d.cookieLock.Lock()
 	defer d.cookieLock.Unlock()
 	d.googleCookie = strings.TrimSpace(cookie)
+	d.populateCookieJar(d.googleCookie)
 }
 
 func (d *Downloader) SetCookieProvider(provider CookieProvider, onExhausted CookieExhaustedNotifier) {
@@ -190,6 +248,11 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 		}
 	}
 
+	if currentCookie != "" {
+		d.populateCookieJar(currentCookie)
+	}
+
+	triedAltEndpoint := false
 	for attempt := 0; attempt < 5; attempt++ {
 		initialURL := fmt.Sprintf("https://drive.usercontent.google.com/download?id=%s&export=download&authuser=0&confirm=t", fileID)
 		req, err := http.NewRequestWithContext(ctx, "GET", initialURL, nil)
@@ -223,8 +286,39 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 			}
 			bodyStr := string(bodyBytes)
 
+			if strings.Contains(bodyStr, "ServiceLogin") || strings.Contains(bodyStr, "accounts.google.com/signin") {
+				logger.Warnf("Download", "File %s: Account '%s' cookie was not recognized as signed-in by Google (may be expired)", fileID, currentCookieID)
+			}
+
 			// Check known Google errors
 			if strings.Contains(bodyStr, "Quota exceeded") || strings.Contains(bodyStr, "Too many users have viewed or downloaded") {
+				// Try alternate drive.google.com/uc endpoint before failing this cookie
+				if !triedAltEndpoint {
+					triedAltEndpoint = true
+					altURL := fmt.Sprintf("https://drive.google.com/uc?id=%s&export=download&confirm=t", fileID)
+					altReq, _ := http.NewRequestWithContext(ctx, "GET", altURL, nil)
+					if altReq != nil {
+						altReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+						if currentCookie != "" {
+							altReq.Header.Set("Cookie", currentCookie)
+						}
+						if altResp, altErr := d.client.Do(altReq); altErr == nil {
+							altCT := altResp.Header.Get("Content-Type")
+							if !strings.Contains(altCT, "text/html") {
+								finalResp = altResp
+								goto streamDirect
+							}
+							altBytes, _ := io.ReadAll(io.LimitReader(altResp.Body, 1024*512))
+							altResp.Body.Close()
+							altStr := string(altBytes)
+							if !strings.Contains(altStr, "Quota exceeded") && !strings.Contains(altStr, "Too many users have viewed or downloaded") {
+								bodyStr = altStr
+								goto parseForm
+							}
+						}
+					}
+				}
+
 				if notifier != nil && currentCookieID != "" {
 					notifier(currentCookieID)
 				}
@@ -233,6 +327,8 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 						logger.Warnf("Download", "File %s: Google Drive quota exceeded on account '%s'. Auto-switching to account '%s' and restarting clean download...", fileID, currentCookieID, nextID)
 						currentCookie = nextCookie
 						currentCookieID = nextID
+						d.populateCookieJar(currentCookie)
+						triedAltEndpoint = false
 						continue
 					}
 				}
@@ -251,6 +347,7 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 				return "", 0, errors.New(errMsg)
 			}
 
+		parseForm:
 			// Extract filename from HTML if available
 			if fnMatches := htmlFilenamePattern.FindStringSubmatch(bodyStr); len(fnMatches) > 1 {
 				fallbackHTMLFilename = html.UnescapeString(fnMatches[1])
@@ -323,6 +420,8 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 							logger.Warnf("Download", "File %s: Quota exceeded on account '%s'. Auto-switching to account '%s' and restarting clean download...", fileID, currentCookieID, nextID)
 							currentCookie = nextCookie
 							currentCookieID = nextID
+							d.populateCookieJar(currentCookie)
+							triedAltEndpoint = false
 							continue
 						}
 					}
@@ -335,6 +434,8 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 				return "", 0, errors.New(errMsg)
 			}
 		}
+
+	streamDirect:
 		defer finalResp.Body.Close()
 
 		var filename string

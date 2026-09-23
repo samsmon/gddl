@@ -128,6 +128,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/gdrive/logout", s.handleClearGoogleCookie)
 	mux.HandleFunc("GET /api/gdrive/cookies", s.handleGetGoogleCookies)
 	mux.HandleFunc("POST /api/gdrive/cookies", s.handleAddGoogleCookie)
+	mux.HandleFunc("POST /api/gdrive/cookies/reset-all", s.handleResetAllGoogleCookies)
 	mux.HandleFunc("DELETE /api/gdrive/cookies/{id}", s.handleDeleteGoogleCookie)
 	mux.HandleFunc("POST /api/gdrive/cookies/{id}/reset", s.handleResetGoogleCookie)
 	mux.HandleFunc("GET /api/fs/browse", s.handleBrowseFS)
@@ -756,6 +757,15 @@ func (s *Server) handleResetGoogleCookie(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := s.authMgr.ResetCookieCooldown(id); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (s *Server) handleResetAllGoogleCookies(w http.ResponseWriter, r *http.Request) {
+	if err := s.authMgr.ResetAllCookieCooldowns(); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
 		return
 	}

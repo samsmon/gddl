@@ -253,6 +253,16 @@ func (m *Manager) ResetCookieCooldown(id string) error {
 	return fmt.Errorf("cookie not found")
 }
 
+func (m *Manager) ResetAllCookieCooldowns() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for i := range m.config.GoogleCookies {
+		m.config.GoogleCookies[i].ExhaustedUntil = nil
+	}
+	return m.saveLocked()
+}
+
 func (m *Manager) MarkCookieExhausted(idOrCookie string, duration time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

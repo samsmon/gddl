@@ -117,6 +117,11 @@ input:focus, textarea:focus {
   border-color: var(--accent-blue);
 }
 
+code, pre, .selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 ::-webkit-scrollbar {
   width: 7px;
   height: 7px;

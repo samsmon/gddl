@@ -412,16 +412,43 @@
     }
   }
 
-  async function logoutGoogle() {
-    try {
-      await fetch('/api/gdrive/logout', { method: 'POST' });
-      hasLogin = false;
-      showLoginModal = false;
-      await fetchGoogleCookies();
-      alert('Google Drive session cookies cleared.');
-    } catch (e) {
-      alert('Error: ' + e.message);
-    }
+  // In-app confirmation dialog modal (replaces native browser confirm())
+  let confirmDialog = $state({
+    show: false,
+    title: '',
+    message: '',
+    confirmText: 'Confirm',
+    confirmType: 'danger',
+    onConfirm: null
+  });
+
+  function openConfirm(title, message, onConfirm, confirmText = 'Confirm', confirmType = 'danger') {
+    confirmDialog = {
+      show: true,
+      title,
+      message,
+      confirmText,
+      confirmType,
+      onConfirm
+    };
+  }
+
+  function handleConfirmAction() {
+    const fn = confirmDialog.onConfirm;
+    confirmDialog.show = false;
+    if (fn) fn();
+  }
+
+  function logoutGoogle() {
+    openConfirm('Clear All Google Accounts', 'This will remove all stored Google session cookies and reset downloads to anonymous quota. Continue?', async () => {
+      try {
+        await fetch('/api/gdrive/logout', { method: 'POST' });
+        hasLogin = false;
+        await fetchGoogleCookies();
+      } catch (e) {
+        console.error('Error clearing cookies:', e);
+      }
+    }, 'Clear All Accounts', 'danger');
   }
 
   let cookieList = $state([]);
@@ -430,6 +457,23 @@
   let isAddingCookie = $state(false);
   let cookieError = $state('');
   let cookieMessage = $state('');
+
+  // Validate presence of core cookies: SID, HSID, SSID
+  let cookieValidation = $derived.by(() => {
+    if (!newCookieValue.trim()) return null;
+    const val = newCookieValue;
+    const hasSID = /(?:^|;\s*)SID=/.test(val);
+    const hasHSID = /(?:^|;\s*)HSID=/.test(val);
+    const hasSSID = /(?:^|;\s*)SSID=/.test(val);
+    const count = (hasSID ? 1 : 0) + (hasHSID ? 1 : 0) + (hasSSID ? 1 : 0);
+    return {
+      hasSID,
+      hasHSID,
+      hasSSID,
+      valid: hasSID && hasHSID && hasSSID,
+      count
+    };
+  });
 
   async function fetchGoogleCookies() {
     try {
@@ -473,16 +517,17 @@
     }
   }
 
-  async function removeCookie(id) {
-    if (!confirm('Remove this account cookie from the pool?')) return;
-    try {
-      const res = await fetch(`/api/gdrive/cookies/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        await fetchGoogleCookies();
+  function removeCookie(id) {
+    openConfirm('Remove Account from Pool', 'Remove this Google account session cookie from the pool?', async () => {
+      try {
+        const res = await fetch(`/api/gdrive/cookies/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          await fetchGoogleCookies();
+        }
+      } catch (e) {
+        console.error(e);
       }
-    } catch (e) {
-      console.error(e);
-    }
+    }, 'Remove', 'danger');
   }
 
   async function resetCookieCooldown(id) {
@@ -493,6 +538,26 @@
       }
     } catch (e) {
       console.error(e);
+    }
+  }
+
+  async function resetAllCookieCooldowns() {
+    try {
+      const res = await fetch('/api/gdrive/cookies/reset-all', { method: 'POST' });
+      if (res.ok) {
+        await fetchGoogleCookies();
+        cookieMessage = 'All account cooldowns have been reset to Active.';
+        setTimeout(() => { cookieMessage = ''; }, 3500);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function resetCooldownAndRetry(itemId) {
+    await resetAllCookieCooldowns();
+    if (itemId) {
+      startDownload(itemId);
     }
   }
 
@@ -557,22 +622,23 @@
     }
   }
 
-  async function logoutWebUI() {
-    if (!confirm('Log out of GDrive Web UI?')) return;
-    try {
-      await fetch('/api/auth/logout', { method: 'POST' });
-    } catch (e) {
-      console.warn(e);
-    }
-    isAuthenticated = false;
-    if (eventSource) {
-      eventSource.close();
-      eventSource = null;
-    }
-    if (pollInterval) {
-      clearInterval(pollInterval);
-      pollInterval = null;
-    }
+  function logoutWebUI() {
+    openConfirm('Log Out Web UI', 'Are you sure you want to log out of the GDrive Downloader Web UI?', async () => {
+      try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+      } catch (e) {
+        console.warn(e);
+      }
+      isAuthenticated = false;
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+    }, 'Log Out', 'danger');
   }
 
   async function updateSecurityCredentials() {
@@ -682,13 +748,77 @@
     fetchLogs();
   }
 
+  let copiedRowId = $state(null);
+
   function copyLogsToClipboard() {
     if (logs.length === 0) return;
     const text = logs.map(l => `[${l.timestamp}] [${l.level}] [${l.category}] ${l.message}${l.details ? ' | ' + l.details : ''}`).join('\n');
-    navigator.clipboard.writeText(text).then(() => {
-      copiedLogs = true;
-      setTimeout(() => copiedLogs = false, 2000);
-    }).catch(() => {});
+    
+    // Modern Clipboard API with fallback for non-secure HTTP contexts
+    if (navigator.clipboard && window.isSecureContext && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => {
+        copiedLogs = true;
+        setTimeout(() => copiedLogs = false, 2000);
+      }).catch(() => fallbackCopy(text));
+    } else {
+      fallbackCopy(text);
+    }
+  }
+
+  function fallbackCopy(text) {
+    try {
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-9999px';
+      textArea.style.top = '0';
+      textArea.style.opacity = '0';
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      const success = document.execCommand('copy');
+      document.body.removeChild(textArea);
+      if (success) {
+        copiedLogs = true;
+        setTimeout(() => copiedLogs = false, 2000);
+      }
+    } catch (err) {
+      console.error('Fallback copy failed', err);
+    }
+  }
+
+  function copyLogRow(log) {
+    const text = `[${log.timestamp}] [${log.level}] [${log.category}] ${log.message}${log.details ? ' | ' + log.details : ''}`;
+    if (navigator.clipboard && window.isSecureContext && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => {
+        copiedRowId = log.id;
+        setTimeout(() => copiedRowId = null, 1500);
+      }).catch(() => fallbackCopyRow(text, log.id));
+    } else {
+      fallbackCopyRow(text, log.id);
+    }
+  }
+
+  function fallbackCopyRow(text, id) {
+    try {
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-9999px';
+      textArea.style.top = '0';
+      textArea.style.opacity = '0';
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      const success = document.execCommand('copy');
+      document.body.removeChild(textArea);
+      if (success) {
+        copiedRowId = id;
+        setTimeout(() => copiedRowId = null, 1500);
+      }
+    } catch (err) {
+      console.error('Fallback copy failed', err);
+    }
   }
 
   async function fetchDownloads() {
@@ -2440,12 +2570,21 @@
                 <div>
                   <strong>Error:</strong> {selectedItem.error}
                 </div>
-                <button class="btn-mini btn-secondary" onclick={() => openLogsModal('ERROR')} style="white-space: nowrap;">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;">
-                    <polyline points="4 17 10 11 4 5"></polyline>
-                    <line x1="12" y1="19" x2="20" y2="19"></line>
-                  </svg>View Logs
-                </button>
+                <div style="display: flex; gap: 6px; flex-shrink: 0;">
+                  {#if selectedItem.error.toLowerCase().includes('quota')}
+                    <button class="btn-mini btn-action" onclick={() => resetCooldownAndRetry(selectedItem.id)} style="white-space: nowrap;">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="vertical-align: middle; margin-right: 4px;">
+                        <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l6 5.67"/>
+                      </svg>Reset Cooldown & Retry
+                    </button>
+                  {/if}
+                  <button class="btn-mini btn-secondary" onclick={() => openLogsModal('ERROR')} style="white-space: nowrap;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;">
+                      <polyline points="4 17 10 11 4 5"></polyline>
+                      <line x1="12" y1="19" x2="20" y2="19"></line>
+                    </svg>View Logs
+                  </button>
+                </div>
               </div>
             </div>
           {/if}
@@ -3011,9 +3150,16 @@
         </div>
 
         <div class="modal-body">
-          <div class="auth-status-banner">
-            <span class="status-indicator" class:active-dot={cookieList.length > 0} class:failed-dot={cookieList.length === 0}></span>
-            <span>Pool Status: <strong>{cookieList.length > 0 ? `${cookieList.filter(c => !c.is_exhausted).length} of ${cookieList.length} Accounts Ready` : 'No accounts configured (using anonymous public IP quota)'}</strong></span>
+          <div class="auth-status-banner" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="status-indicator" class:active-dot={cookieList.length > 0} class:failed-dot={cookieList.length === 0}></span>
+              <span>Pool Status: <strong>{cookieList.length > 0 ? `${cookieList.filter(c => !c.is_exhausted).length} of ${cookieList.length} Accounts Ready` : 'No accounts configured (using anonymous public IP quota)'}</strong></span>
+            </div>
+            {#if cookieList.some(c => c.is_exhausted)}
+              <button class="btn-mini btn-action" onclick={resetAllCookieCooldowns} title="Reset all exhausted accounts back to active">
+                Reset All Cooldowns
+              </button>
+            {/if}
           </div>
 
           <span class="form-hint" style="margin-top: 0.5rem; margin-bottom: 0.75rem;">
@@ -3063,21 +3209,45 @@
           <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 8px;">
             <span style="font-weight: 600; font-size: 12px; color: var(--accent-blue);">+ Add Google Account Cookie</span>
 
-            <div style="display: grid; grid-template-columns: 110px 1fr; gap: 8px; align-items: center;">
-              <span style="font-size: 11px; color: var(--text-muted);">Account Label:</span>
+            <div style="display: grid; grid-template-columns: 110px 1fr; gap: 8px; align-items: flex-start;">
+              <span style="font-size: 11px; color: var(--text-muted); padding-top: 5px;">Account Label:</span>
               <input type="text" bind:value={newCookieLabel} placeholder="e.g. Gmail Utama, Gmail 2..." style="padding: 4px 8px; font-size: 12px;" />
 
-              <span style="font-size: 11px; color: var(--text-muted);">Cookie String:</span>
-              <textarea
-                bind:value={newCookieValue}
-                rows="3"
-                placeholder="Paste Cookie header string (SID=...; HSID=...)"
-                style="padding: 4px 8px; font-size: 11px; font-family: var(--font-mono); resize: vertical;"
-              ></textarea>
+              <span style="font-size: 11px; color: var(--text-muted); padding-top: 5px;">Cookie String:</span>
+              <div style="display: flex; flex-direction: column; gap: 6px;">
+                <textarea
+                  bind:value={newCookieValue}
+                  rows="3"
+                  placeholder="Paste complete Cookie header string (contains SID, HSID, SSID)"
+                  style="padding: 6px 8px; font-size: 11px; font-family: var(--font-mono); resize: vertical; width: 100%; box-sizing: border-box;"
+                ></textarea>
+
+                {#if cookieValidation}
+                  <div style="padding: 6px 8px; border-radius: 4px; font-size: 11px; background: {cookieValidation.valid ? 'rgba(46,160,67,0.12)' : 'rgba(210,153,34,0.14)'}; border: 1px solid {cookieValidation.valid ? 'rgba(46,160,67,0.3)' : 'rgba(210,153,34,0.35)'};">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; flex-wrap: wrap; gap: 4px;">
+                      <span style="font-weight: 600; color: {cookieValidation.valid ? 'var(--accent-green)' : '#e3b341'};">
+                        {cookieValidation.valid ? 'All 3 Core Authentication Cookies Detected' : `Incomplete Cookie (${cookieValidation.count}/3 Core Keys Detected)`}
+                      </span>
+                      <span style="font-family: var(--font-mono); font-size: 10px;">
+                        <span style="color: {cookieValidation.hasSID ? 'var(--accent-green)' : 'var(--text-dim)'}; font-weight: {cookieValidation.hasSID ? 'bold' : 'normal'};">SID {cookieValidation.hasSID ? 'OK' : 'MISSING'}</span> |
+                        <span style="color: {cookieValidation.hasHSID ? 'var(--accent-green)' : 'var(--text-dim)'}; font-weight: {cookieValidation.hasHSID ? 'bold' : 'normal'};">HSID {cookieValidation.hasHSID ? 'OK' : 'MISSING'}</span> |
+                        <span style="color: {cookieValidation.hasSSID ? 'var(--accent-green)' : 'var(--text-dim)'}; font-weight: {cookieValidation.hasSSID ? 'bold' : 'normal'};">SSID {cookieValidation.hasSSID ? 'OK' : 'MISSING'}</span>
+                      </span>
+                    </div>
+                    {#if !cookieValidation.valid}
+                      <div style="font-size: 10px; color: var(--text-muted); line-height: 1.4; margin-top: 3px;">
+                        Google Drive requires all three cookies: <strong>SID</strong>, <strong>HSID</strong>, and <strong>SSID</strong>. If any are missing, Google will still treat requests as anonymous and hit quota.
+                        <br/>
+                        <strong>How to copy:</strong> Open Chrome DevTools (F12) on drive.google.com &gt; Network tab &gt; click any request &gt; Headers &gt; Request Headers &gt; right-click <code>Cookie</code> &gt; <em>Copy value</em>.
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
             </div>
 
             <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
-              <span style="font-size: 10px; color: var(--text-dim);">DevTools (F12) &gt; Network &gt; Request Headers &gt; Cookie</span>
+              <span style="font-size: 10px; color: var(--text-dim);">DevTools (F12) &gt; Network &gt; Request Headers &gt; Cookie (Right click &gt; Copy value)</span>
               <button class="btn btn-primary" disabled={!newCookieValue.trim() || isAddingCookie} onclick={addCookieToPool} style="font-size: 11px; padding: 4px 12px;">
                 {isAddingCookie ? 'Adding...' : 'Add Account to Pool'}
               </button>
@@ -3544,6 +3714,25 @@
                       <div class="log-details">{log.details}</div>
                     {/if}
                   </div>
+                  <button
+                    class="btn-copy-log-row"
+                    class:copied={copiedRowId === log.id}
+                    onclick={() => copyLogRow(log)}
+                    title={copiedRowId === log.id ? 'Copied to clipboard' : 'Copy log line'}
+                    aria-label="Copy log line"
+                  >
+                    {#if copiedRowId === log.id}
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                      </svg>
+                      <span>Copied</span>
+                    {:else}
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                      </svg>
+                    {/if}
+                  </button>
                 </div>
               {/each}
             </div>
@@ -3560,6 +3749,46 @@
     </div>
   {/if}
 </div>
+{/if}
+
+<!-- In-App Confirmation Modal -->
+{#if confirmDialog.show}
+  <div
+    class="modal-overlay"
+    style="z-index: 1000;"
+    role="presentation"
+    onclick={() => confirmDialog.show = false}
+    onkeydown={(e) => e.key === 'Escape' && (confirmDialog.show = false)}
+  >
+    <div
+      class="modal-window confirm-modal-window"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}
+      style="max-width: 440px;"
+    >
+      <div class="modal-header">
+        <span>{confirmDialog.title || 'Confirm Action'}</span>
+        <button class="modal-close" aria-label="Close" onclick={() => confirmDialog.show = false}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body" style="padding: 18px 20px;">
+        <p style="margin: 0; font-size: 13px; line-height: 1.5; color: var(--text-main); white-space: pre-line;">{confirmDialog.message}</p>
+      </div>
+      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn btn-secondary" onclick={() => confirmDialog.show = false}>Cancel</button>
+        <button class="btn btn-{confirmDialog.confirmType || 'primary'}" onclick={handleConfirmAction}>
+          {confirmDialog.confirmText || 'Confirm'}
+        </button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -5196,5 +5425,71 @@
   .child-status-paused {
     background: rgba(245, 158, 11, 0.15);
     color: var(--accent-amber);
+  }
+  .btn-copy-log-row {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #8b949e;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 10px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0.35;
+    transition: opacity 0.15s, background-color 0.15s, color 0.15s, border-color 0.15s;
+    flex-shrink: 0;
+    margin-left: auto;
+    user-select: none !important;
+  }
+  .log-row:hover .btn-copy-log-row {
+    opacity: 1;
+  }
+  .btn-copy-log-row:hover {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.08);
+    color: #f0f6fc;
+    border-color: rgba(255, 255, 255, 0.25);
+  }
+  .btn-copy-log-row.copied {
+    opacity: 1;
+    color: #4ade80;
+    border-color: rgba(74, 222, 128, 0.4);
+    background: rgba(74, 222, 128, 0.12);
+  }
+
+  /* Allow text selection in logs, details, errors, and cookie lists */
+  .logs-modal-body,
+  .logs-modal-body *,
+  .logs-container,
+  .log-row,
+  .log-row *,
+  .log-msg-col,
+  .log-msg,
+  .log-details,
+  .log-time,
+  .detail-panel,
+  .detail-panel *,
+  .detail-error,
+  .cookie-pool-container,
+  .cookie-pool-container * {
+    user-select: text !important;
+    -webkit-user-select: text !important;
+  }
+
+  /* Confirm dialog styles */
+  .confirm-modal-window {
+    animation: confirmPop 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes confirmPop {
+    from {
+      opacity: 0;
+      transform: scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
   }
 </style>
