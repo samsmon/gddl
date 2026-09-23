@@ -490,22 +490,38 @@
     }
 
     // 2. cURL (-H 'cookie: ...' or --header "Cookie: ...")
-    const curlMatch = str.match(/(?:-H|--header)\s+[\$]?[\^'"]+(?:[Cc]ookie:\s*)([^\r\n'"\^]+)/i);
-    if (curlMatch && curlMatch[1]) return curlMatch[1].trim();
+    const curlH = str.match(/(?:-H|--header)\s+[\$]?[\^'"]+(?:[Cc]ookie:\s*)([^\r\n'"\^]+)/i);
+    if (curlH && curlH[1]) str = curlH[1].trim();
+    else {
+      // cURL (-b '...' or --cookie '...')
+      const curlB = str.match(/(?:-b|--cookie)\s+[\$]?[\^'"]+([^\r\n'"\^]+)/i);
+      if (curlB && curlB[1]) str = curlB[1].trim();
+      else {
+        // 3. PowerShell Invoke-WebRequest headers
+        const psMatch = str.match(/["']cookie["']\s*=\s*["']([^"']+)["']/i);
+        if (psMatch && psMatch[1]) str = psMatch[1].trim();
+        else {
+          // 4. Fetch headers
+          const fetchMatch = str.match(/["']cookie["']:\s*["']([^"']+)["']/i);
+          if (fetchMatch && fetchMatch[1]) str = fetchMatch[1].trim();
+          else {
+            // 5. Raw HTTP Request Headers line: Cookie: ...
+            const headerMatch = str.match(/(?:^|\n)\s*cookie:\s*([^\r\n]+)/i);
+            if (headerMatch && headerMatch[1]) str = headerMatch[1].trim();
+          }
+        }
+      }
+    }
 
-    // 3. PowerShell Invoke-WebRequest headers
-    const psMatch = str.match(/["']cookie["']\s*=\s*["']([^"']+)["']/i);
-    if (psMatch && psMatch[1]) return psMatch[1].trim();
-
-    // 4. Fetch headers
-    const fetchMatch = str.match(/["']cookie["']:\s*["']([^"']+)["']/i);
-    if (fetchMatch && fetchMatch[1]) return fetchMatch[1].trim();
-
-    // 5. Raw HTTP Request Headers line: Cookie: ...
-    const headerMatch = str.match(/(?:^|\n)\s*cookie:\s*([^\r\n]+)/i);
-    if (headerMatch && headerMatch[1]) return headerMatch[1].trim();
-
-    return str;
+    // Clean any invalid header chars (ASCII < 32 or >= 127) that trigger net/http: invalid header field value
+    let cleaned = '';
+    for (let i = 0; i < str.length; i++) {
+      const code = str.charCodeAt(i);
+      if (code >= 32 && code < 127) {
+        cleaned += str[i];
+      }
+    }
+    return cleaned.trim();
   }
 
   function handleCookieInput(val) {

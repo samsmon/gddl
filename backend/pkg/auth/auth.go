@@ -16,7 +16,8 @@ import (
 )
 
 var (
-	curlCookieRegex   = regexp.MustCompile(`(?i)(?:-H|--header)\s+[\$]?[\^'"]+(?:cookie:\s*)([^\r\n'"\^]+)`)
+	curlCookieRegex  = regexp.MustCompile(`(?i)(?:-H|--header)\s+[\$]?[\^'"]+(?:cookie:\s*)([^\r\n'"\^]+)`)
+	curlCookieBRegex = regexp.MustCompile(`(?i)(?:-b|--cookie)\s+[\$]?[\^'"]+([^\r\n'"\^]+)`)
 	headerCookieRegex = regexp.MustCompile(`(?im)^\s*cookie:\s*([^\r\n]+)`)
 )
 
@@ -40,22 +41,28 @@ func CleanCookieString(raw string) string {
 				}
 			}
 			if len(parts) > 0 {
-				return strings.Join(parts, "; ")
+				str = strings.Join(parts, "; ")
 			}
 		}
+	} else if m := curlCookieRegex.FindStringSubmatch(str); len(m) > 1 {
+		// 2. cURL (-H 'cookie: ...')
+		str = strings.TrimSpace(m[1])
+	} else if m := curlCookieBRegex.FindStringSubmatch(str); len(m) > 1 {
+		// 3. cURL (-b '...')
+		str = strings.TrimSpace(m[1])
+	} else if m := headerCookieRegex.FindStringSubmatch(str); len(m) > 1 {
+		// 4. Raw headers (Cookie: ...)
+		str = strings.TrimSpace(m[1])
 	}
 
-	// 2. cURL (-H 'cookie: ...')
-	if m := curlCookieRegex.FindStringSubmatch(str); len(m) > 1 {
-		return strings.TrimSpace(m[1])
+	// Sanitize any control characters, newlines, CR, or invalid bytes that break net/http header fields
+	var b strings.Builder
+	for _, r := range str {
+		if r >= 32 && r < 127 {
+			b.WriteRune(r)
+		}
 	}
-
-	// 3. Raw headers (Cookie: ...)
-	if m := headerCookieRegex.FindStringSubmatch(str); len(m) > 1 {
-		return strings.TrimSpace(m[1])
-	}
-
-	return str
+	return strings.TrimSpace(b.String())
 }
 
 type CookieEntry struct {
