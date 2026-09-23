@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"gdrive-downloader/pkg/chunked"
 	"gdrive-downloader/pkg/logger"
 )
 
@@ -558,7 +559,8 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 			existingSize = fi.Size()
 		}
 
-		if existingSize == 0 && totalSize > 10*1024*1024 && chunks > 1 && downloadURL != "" {
+		shouldUseChunks := chunks > 1 && downloadURL != "" && totalSize > 10*1024*1024 && (existingSize == 0 || (totalSize-existingSize) > 5*1024*1024 || chunked.HasChunkMeta(destPath))
+		if shouldUseChunks {
 			finalResp.Body.Close()
 			logger.Infof("Download", "Downloading '%s' (%d bytes) with %d parallel chunk streams", filename, totalSize, chunks)
 

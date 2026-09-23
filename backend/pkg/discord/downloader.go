@@ -13,12 +13,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"gdrive-downloader/pkg/chunked"
 	"gdrive-downloader/pkg/logger"
 )
 
-type ProgressCallback func(downloadedBytes, totalBytes, speed int64, etaSeconds int64, percentage float64)
+type ProgressCallback = chunked.ProgressCallback
 
 type progressReader struct {
 	ctx            context.Context
@@ -65,7 +67,10 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 }
 
 type Downloader struct {
-	client *http.Client
+	client            *http.Client
+	chunkedDownloader *chunked.Downloader
+	chunksPerDownload int
+	mu                sync.RWMutex
 }
 
 func NewDownloader() *Downloader {
@@ -77,12 +82,39 @@ func NewDownloader() *Downloader {
 		WriteBufferSize:     1024 * 1024,
 	}
 
-	return &Downloader{
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   0,
-		},
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   0,
 	}
+
+	return &Downloader{
+		client:            client,
+		chunkedDownloader: chunked.NewDownloader(client),
+		chunksPerDownload: 4,
+	}
+}
+
+// SetChunksPerDownload configures parallel download streams for large Discord attachments.
+func (d *Downloader) SetChunksPerDownload(n int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if n < 1 {
+		n = 1
+	}
+	if n > 16 {
+		n = 16
+	}
+	d.chunksPerDownload = n
+}
+
+// GetChunksPerDownload returns the configured parallel streams for Discord downloads.
+func (d *Downloader) GetChunksPerDownload() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.chunksPerDownload <= 0 {
+		return 4
+	}
+	return d.chunksPerDownload
 }
 
 // IsDiscordURL checks whether the given URL is a Discord CDN attachment URL
@@ -126,18 +158,22 @@ func ExtractDiscordFileInfo(rawURL string) (filename string, expiry time.Time, i
 }
 
 func applyBrowserHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Referer", "https://discord.com/")
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "cross-site")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	applyBrowserHeadersToHeader(req.Header)
+}
+
+func applyBrowserHeadersToHeader(h http.Header) {
+	h.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+	h.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	h.Set("Accept-Language", "en-US,en;q=0.9")
+	h.Set("Referer", "https://discord.com/")
+	h.Set("Sec-Ch-Ua", `"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"`)
+	h.Set("Sec-Ch-Ua-Mobile", "?0")
+	h.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	h.Set("Sec-Fetch-Dest", "document")
+	h.Set("Sec-Fetch-Mode", "navigate")
+	h.Set("Sec-Fetch-Site", "cross-site")
+	h.Set("Sec-Fetch-User", "?1")
+	h.Set("Upgrade-Insecure-Requests", "1")
 }
 
 // GetFileInfo inspects the file using a HEAD request
@@ -298,9 +334,50 @@ func (d *Downloader) Download(
 			return filename, existingBytes, fmt.Errorf("unexpected status %s (HTTP %d)", resp.Status, resp.StatusCode)
 		}
 
-		// Open target file
+		// Determine total size
 		var out *os.File
 		var totalBytes int64
+
+		if resp.StatusCode == http.StatusPartialContent && existingBytes > 0 {
+			totalBytes = existingBytes + resp.ContentLength
+		} else {
+			existingBytes = 0
+			totalBytes = resp.ContentLength
+		}
+
+		chunks := d.GetChunksPerDownload()
+		shouldUseChunks := chunks > 1 && totalBytes > 10*1024*1024 && (existingBytes == 0 || (totalBytes-existingBytes) > 5*1024*1024 || chunked.HasChunkMeta(partPath))
+		if shouldUseChunks {
+			resp.Body.Close()
+			logger.Infof("Discord", "Downloading '%s' (%d bytes) with %d parallel chunk streams", filename, totalBytes, chunks)
+
+			headers := http.Header{}
+			applyBrowserHeadersToHeader(headers)
+
+			copied, err := d.chunkedDownloader.DownloadSegmented(
+				ctx,
+				partPath,
+				rawURL,
+				totalBytes,
+				headers,
+				chunks,
+				onProgress,
+			)
+			if err != nil {
+				return filename, copied, err
+			}
+
+			// Rename partPath to destPath
+			if err := os.Rename(partPath, destPath); err != nil {
+				_ = os.Remove(destPath)
+				if err := os.Rename(partPath, destPath); err != nil {
+					return filename, copied, fmt.Errorf("failed to finalize downloaded file: %w", err)
+				}
+			}
+
+			logger.Successf("Discord", "Saved '%s' successfully (%d bytes) via %d streams", filename, copied, chunks)
+			return filename, copied, nil
+		}
 
 		if resp.StatusCode == http.StatusPartialContent && existingBytes > 0 {
 			out, err = os.OpenFile(partPath, os.O_WRONLY|os.O_APPEND, 0644)
@@ -308,16 +385,12 @@ func (d *Downloader) Download(
 				resp.Body.Close()
 				return filename, existingBytes, fmt.Errorf("failed to open part file for append: %w", err)
 			}
-			totalBytes = existingBytes + resp.ContentLength
 		} else {
-			// Start fresh
-			existingBytes = 0
 			out, err = os.Create(partPath)
 			if err != nil {
 				resp.Body.Close()
 				return filename, 0, fmt.Errorf("failed to create part file: %w", err)
 			}
-			totalBytes = resp.ContentLength
 		}
 
 		pr := &progressReader{

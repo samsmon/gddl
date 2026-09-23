@@ -99,6 +99,7 @@ func NewServer(manager *queue.Manager, authMgr *auth.Manager, distPath string) *
 	chunks := authMgr.GetChunksPerDownload()
 	manager.Downloader().SetChunksPerDownload(chunks)
 	bypassMgr.SetChunksPerDownload(chunks)
+	manager.DiscordDownloader().SetChunksPerDownload(chunks)
 
 	s := &Server{
 		manager:   manager,
@@ -692,6 +693,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if cfg.ChunksPerDownload > 0 {
 		s.manager.Downloader().SetChunksPerDownload(cfg.ChunksPerDownload)
 		s.bypassMgr.SetChunksPerDownload(cfg.ChunksPerDownload)
+		s.manager.DiscordDownloader().SetChunksPerDownload(cfg.ChunksPerDownload)
 	}
 	if cfg.GoogleCookie != "" {
 		s.manager.Downloader().SetGoogleCookie(cfg.GoogleCookie)

@@ -2647,6 +2647,9 @@
                         </svg>MOVING ({(item.move_progress || 0).toFixed(0)}%)</span>
                     {:else}
                       <span class="status-tag status-{item.status}">{item.status}</span>
+                      {#if item.status === 'downloading' && item.chunks && item.chunks > 1}
+                        <span class="chunks-badge" title="{item.chunks} Parallel Streams (Multi-Chunk / IDM Style)">{item.chunks} Chunks</span>
+                      {/if}
                     {/if}
                   </td>
                   <td class="col-speed font-mono">
@@ -2803,6 +2806,16 @@
                 <span class="prop-label">Status:</span>
                 <span class="prop-val" class:val-corrupt={selectedItem.status === 'corrupted'} class:val-missing={selectedItem.status === 'missing'}>
                   {selectedItem.status.toUpperCase()}
+                </span>
+              </div>
+              <div>
+                <span class="prop-label">Transfer Mode:</span>
+                <span class="prop-val font-mono">
+                  {#if selectedItem.chunks && selectedItem.chunks > 1}
+                    <span class="badge-chunks-detail">{selectedItem.chunks} Parallel Streams (Multi-Chunk)</span>
+                  {:else}
+                    <span style="color: var(--text-muted);">Single Stream</span>
+                  {/if}
                 </span>
               </div>
               <div><span class="prop-label">Downloaded:</span> <span class="prop-val font-mono">{formatBytes(selectedItem.downloaded_bytes)} / {formatBytes(selectedItem.total_bytes)}</span></div>
@@ -4795,6 +4808,30 @@
   .status-corrupted { background: rgba(248, 81, 73, 0.25); color: var(--accent-red); border: 1px solid var(--accent-red); }
   .status-failed { background: rgba(248, 81, 73, 0.18); color: var(--accent-red); }
   .status-cancelled { background: var(--border-subtle); color: var(--text-dim); }
+  .chunks-badge {
+    display: inline-block;
+    font-size: 0.62rem;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    background: rgba(56, 189, 248, 0.15);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.35);
+    margin-left: 4px;
+    vertical-align: middle;
+    letter-spacing: 0.02em;
+  }
+  .badge-chunks-detail {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(56, 189, 248, 0.15);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.35);
+  }
   .bulk-adding-banner {
     display: flex;
     align-items: center;

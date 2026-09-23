@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"gdrive-downloader/pkg/chunked"
 	"gdrive-downloader/pkg/logger"
 )
 
@@ -473,7 +474,8 @@ func (bm *BypassManager) DownloadClonedFile(
 	}
 
 	chunks := bm.GetChunksPerDownload()
-	if startOffset == 0 && totalSize > 10*1024*1024 && chunks > 1 {
+	shouldUseChunks := chunks > 1 && totalSize > 10*1024*1024 && (startOffset == 0 || (totalSize-startOffset) > 5*1024*1024 || chunked.HasChunkMeta(destPath))
+	if shouldUseChunks {
 		resp.Body.Close()
 		logger.Infof("Bypass", "Downloading '%s' (%d bytes) with %d parallel chunk streams", filename, totalSize, chunks)
 

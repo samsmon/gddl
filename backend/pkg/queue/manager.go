@@ -72,6 +72,7 @@ type DownloadItem struct {
 	Error           string         `json:"error,omitempty"`
 	CreatedAt       time.Time      `json:"created_at"`
 	LastTryAt       time.Time      `json:"last_try_at"`
+	Chunks          int            `json:"chunks,omitempty"`
 
 	// Folder support
 	IsFolder            bool                    `json:"is_folder"`
@@ -122,6 +123,7 @@ func (it *DownloadItem) Snapshot() DownloadItem {
 		CompressionProgress: it.CompressionProgress,
 		MoveProgress:        it.MoveProgress,
 		FolderFiles:         childFiles,
+		Chunks:              it.Chunks,
 	}
 }
 
@@ -329,6 +331,10 @@ func (m *Manager) Downloader() *gdrive.Downloader {
 	return m.downloader
 }
 
+func (m *Manager) DiscordDownloader() *discord.Downloader {
+	return m.discordDownloader
+}
+
 func (m *Manager) triggerBroadcast() {
 	select {
 	case m.notifyChan <- struct{}{}:
@@ -357,9 +363,11 @@ func (m *Manager) worker() {
 			item.mu.Unlock()
 			continue
 		}
+		configuredChunks := m.downloader.GetChunksPerDownload()
 		item.Status = StatusDownloading
 		item.LastTryAt = time.Now()
 		item.Error = ""
+		item.Chunks = configuredChunks
 		ctx, cancel := context.WithCancel(context.Background())
 		item.cancelFunc = cancel
 		isFolderZip := item.IsFolder && item.ZipMode
@@ -397,6 +405,11 @@ func (m *Manager) worker() {
 					item.Speed = speed
 					item.ETASeconds = etaSeconds
 					item.Percentage = percentage
+					if totalBytes <= 10*1024*1024 {
+						item.Chunks = 1
+					} else {
+						item.Chunks = configuredChunks
+					}
 					item.mu.Unlock()
 				},
 				desiredName,
@@ -413,6 +426,11 @@ func (m *Manager) worker() {
 					item.Speed = speed
 					item.ETASeconds = etaSeconds
 					item.Percentage = percentage
+					if totalBytes <= 10*1024*1024 {
+						item.Chunks = 1
+					} else {
+						item.Chunks = configuredChunks
+					}
 					item.mu.Unlock()
 				},
 				desiredName,
@@ -1443,7 +1461,10 @@ func (m *Manager) Restart(id string) error {
 	stagingDir := filepath.Join(targetFolder, fmt.Sprintf(".tmp_gdrive_%s", itemId))
 	_ = os.RemoveAll(stagingDir)
 	if item.Filename != "" {
+		_ = os.Remove(filepath.Join(targetFolder, item.Filename))
 		_ = os.Remove(filepath.Join(targetFolder, item.Filename+".part"))
+		_ = os.Remove(filepath.Join(targetFolder, item.Filename+".gddl-chunks"))
+		_ = os.Remove(filepath.Join(targetFolder, item.Filename+".part.gddl-chunks"))
 	}
 
 	logger.Infof("Queue", "Restarted download '%s' from beginning (staging cleared)", item.Filename)
@@ -1796,6 +1817,8 @@ func (m *Manager) Delete(id string, deleteFile bool) error {
 				filePath := filepath.Join(targetFolder, filename)
 				_ = os.Remove(filePath)
 				_ = os.Remove(filePath + ".part")
+				_ = os.Remove(filePath + ".gddl-chunks")
+				_ = os.Remove(filePath + ".part.gddl-chunks")
 			}
 		}
 	}
