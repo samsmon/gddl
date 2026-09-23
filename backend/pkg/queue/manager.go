@@ -376,6 +376,12 @@ func (m *Manager) worker() {
 			desiredName = item.Filename
 		}
 
+		displayName := item.Filename
+		if displayName == "" {
+			displayName = item.FileID
+		}
+		logger.Infof("Queue", "Starting download '%s'", displayName)
+
 		var filename string
 		var err error
 
@@ -415,19 +421,26 @@ func (m *Manager) worker() {
 
 		item.mu.Lock()
 		item.cancelFunc = nil
+		if filename != "" {
+			displayName = filename
+		}
+
 		if err != nil {
 			if strings.Contains(err.Error(), "context canceled") {
 				// Check if user paused or cancelled
 				if item.Status != StatusPaused {
 					item.Status = StatusCancelled
 				}
+				logger.Warnf("Queue", "Download cancelled for '%s'", displayName)
 			} else if strings.HasPrefix(err.Error(), "CORRUPT:") {
 				item.Status = StatusCorrupted
 				item.Error = strings.TrimSpace(strings.TrimPrefix(err.Error(), "CORRUPT:"))
 				item.Filename = filename
+				logger.Errorf("Integrity", "Download corrupted for '%s': %s", displayName, item.Error)
 			} else {
 				item.Status = StatusFailed
 				item.Error = err.Error()
+				logger.Errorf("Queue", "Download failed for '%s': %v", displayName, err)
 			}
 			item.Speed = 0
 			item.ETASeconds = 0
@@ -437,6 +450,7 @@ func (m *Manager) worker() {
 			item.Percentage = 100
 			item.Speed = 0
 			item.ETASeconds = 0
+			logger.Successf("Queue", "Finished downloading '%s'", filename)
 		}
 		item.mu.Unlock()
 		m.triggerBroadcast()

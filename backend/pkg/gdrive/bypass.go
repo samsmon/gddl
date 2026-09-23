@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,7 +29,8 @@ const (
 // and permanently purging the cloned copy after completion.
 type BypassManager struct {
 	oauthMgr     *OAuthManager
-	httpClient   *http.Client
+	apiClient    *http.Client
+	streamClient *http.Client
 	folderMu     sync.RWMutex
 	tempFolderID string
 	autoBypass   bool
@@ -36,11 +38,38 @@ type BypassManager struct {
 
 // NewBypassManager creates a new BypassManager with the provided OAuthManager.
 func NewBypassManager(oauthMgr *OAuthManager, autoBypass bool) *BypassManager {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	streamTransport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, "tcp4", addr)
+			if err != nil {
+				return dialer.DialContext(ctx, network, addr)
+			}
+			return conn, nil
+		},
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ReadBufferSize:        1024 * 1024, // 1MB buffer for fast streaming
+		WriteBufferSize:       1024 * 1024,
+	}
+
 	return &BypassManager{
 		oauthMgr:   oauthMgr,
 		autoBypass: autoBypass,
-		httpClient: &http.Client{
+		apiClient: &http.Client{
 			Timeout: 60 * time.Second,
+		},
+		streamClient: &http.Client{
+			Transport: streamTransport,
+			Timeout:   0, // NO TIMEOUT for streaming file downloads!
 		},
 	}
 }
@@ -90,7 +119,7 @@ func (bm *BypassManager) EnsureTempFolder(ctx context.Context) (string, error) {
 		req, err := http.NewRequestWithContext(ctx, "GET", verifyURL, nil)
 		if err == nil {
 			req.Header.Set("Authorization", "Bearer "+token)
-			resp, err := bm.httpClient.Do(req)
+			resp, err := bm.apiClient.Do(req)
 			if err == nil {
 				defer resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
@@ -117,7 +146,7 @@ func (bm *BypassManager) EnsureTempFolder(ctx context.Context) (string, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := bm.httpClient.Do(req)
+	resp, err := bm.apiClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed searching for %s folder: %w", TempFolderName, err)
 	}
@@ -163,7 +192,7 @@ func (bm *BypassManager) EnsureTempFolder(ctx context.Context) (string, error) {
 	createReq.Header.Set("Authorization", "Bearer "+token)
 	createReq.Header.Set("Content-Type", "application/json")
 
-	createResp, err := bm.httpClient.Do(createReq)
+	createResp, err := bm.apiClient.Do(createReq)
 	if err != nil {
 		return "", fmt.Errorf("failed creating %s folder: %w", TempFolderName, err)
 	}
@@ -216,7 +245,7 @@ func (bm *BypassManager) CloneFileToTemp(ctx context.Context, sourceFileID strin
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := bm.httpClient.Do(req)
+	resp, err := bm.apiClient.Do(req)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("failed sending copy request: %w", err)
 	}
@@ -290,7 +319,7 @@ func (bm *BypassManager) DeleteFile(ctx context.Context, fileID string) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := bm.httpClient.Do(req)
+	resp, err := bm.apiClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -325,7 +354,7 @@ func (bm *BypassManager) EmptyTempFolder(ctx context.Context) (int, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := bm.httpClient.Do(req)
+	resp, err := bm.apiClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -392,15 +421,18 @@ func (bm *BypassManager) DownloadClonedFile(
 		startOffset = fi.Size()
 	}
 
-	resp, err := bm.httpClient.Do(req)
+	resp, err := bm.streamClient.Do(req)
 	if err != nil {
+		logger.Errorf("Bypass", "Failed initiating streaming download for '%s' (cloned ID: %s): %v", filename, clonedID, err)
 		return "", 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*64))
-		return "", 0, fmt.Errorf("failed downloading cloned file (HTTP %d): %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("failed downloading cloned file (HTTP %d): %s", resp.StatusCode, string(body))
+		logger.Errorf("Bypass", "Download failed for '%s': %v", filename, err)
+		return "", 0, err
 	}
 
 	totalSize := resp.ContentLength
@@ -439,6 +471,7 @@ func (bm *BypassManager) DownloadClonedFile(
 	if err != nil {
 		out.Close()
 		_ = os.Remove(destPath)
+		logger.Errorf("Bypass", "Streaming download failed for '%s' (cloned ID: %s): %v", filename, clonedID, err)
 		return filename, copied, err
 	}
 	out.Close()
