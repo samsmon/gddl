@@ -117,7 +117,7 @@
   let filteredDownloads = $derived.by(() => {
     let list = downloads.filter(item => {
       // Filter by status
-      if (activeFilter === 'downloading' && item.status !== 'downloading' && item.status !== 'compressing') return false;
+      if (activeFilter === 'downloading' && item.status !== 'downloading' && item.status !== 'compressing' && item.status !== 'moving') return false;
       if (activeFilter === 'queued' && item.status !== 'queued') return false;
       if (activeFilter === 'paused' && item.status !== 'paused') return false;
       if (activeFilter === 'completed' && item.status !== 'completed') return false;
@@ -196,7 +196,7 @@
   // Counts and stats
   let counts = $derived.by(() => ({
     all: downloads.length,
-    downloading: downloads.filter(d => d.status === 'downloading' || d.status === 'compressing').length,
+    downloading: downloads.filter(d => d.status === 'downloading' || d.status === 'compressing' || d.status === 'moving').length,
     queued: downloads.filter(d => d.status === 'queued').length,
     paused: downloads.filter(d => d.status === 'paused').length,
     completed: downloads.filter(d => d.status === 'completed').length,
@@ -417,9 +417,82 @@
       await fetch('/api/gdrive/logout', { method: 'POST' });
       hasLogin = false;
       showLoginModal = false;
-      alert('Google Drive session cookie cleared.');
+      await fetchGoogleCookies();
+      alert('Google Drive session cookies cleared.');
     } catch (e) {
       alert('Error: ' + e.message);
+    }
+  }
+
+  let cookieList = $state([]);
+  let newCookieLabel = $state('');
+  let newCookieValue = $state('');
+  let isAddingCookie = $state(false);
+  let cookieError = $state('');
+  let cookieMessage = $state('');
+
+  async function fetchGoogleCookies() {
+    try {
+      const res = await fetch('/api/gdrive/cookies');
+      if (res.ok) {
+        cookieList = await res.json();
+        hasLogin = cookieList.length > 0;
+      }
+    } catch (e) {
+      console.error('Failed fetching cookies:', e);
+    }
+  }
+
+  async function addCookieToPool() {
+    if (!newCookieValue.trim()) return;
+    isAddingCookie = true;
+    cookieError = '';
+    cookieMessage = '';
+    try {
+      const res = await fetch('/api/gdrive/cookies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          label: newCookieLabel.trim(),
+          cookie: newCookieValue.trim()
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Failed to add cookie' }));
+        throw new Error(err.error || 'Failed to add cookie');
+      }
+      newCookieLabel = '';
+      newCookieValue = '';
+      cookieMessage = 'Account added to Cookie Pool successfully.';
+      await fetchGoogleCookies();
+      setTimeout(() => { cookieMessage = ''; }, 4000);
+    } catch (e) {
+      cookieError = e.message;
+    } finally {
+      isAddingCookie = false;
+    }
+  }
+
+  async function removeCookie(id) {
+    if (!confirm('Remove this account cookie from the pool?')) return;
+    try {
+      const res = await fetch(`/api/gdrive/cookies/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        await fetchGoogleCookies();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function resetCookieCooldown(id) {
+    try {
+      const res = await fetch(`/api/gdrive/cookies/${id}/reset`, { method: 'POST' });
+      if (res.ok) {
+        await fetchGoogleCookies();
+      }
+    } catch (e) {
+      console.error(e);
     }
   }
 
@@ -567,6 +640,7 @@
     loadConfig();
     fetchDownloads();
     fetchLogs();
+    fetchGoogleCookies();
     setupSSE();
     if (!pollInterval) {
       pollInterval = setInterval(() => {
@@ -706,6 +780,8 @@
     }
   }
 
+  let bulkAddingStatus = $state('');
+
   async function submitAddDownloads() {
     if (!addLinksInput.trim()) return;
 
@@ -716,9 +792,49 @@
 
     if (raw.length === 0) return;
 
+    // For bulk links (multiple URLs), close modal instantly like IDM!
+    if (raw.length > 1) {
+      const linksToProcess = [...raw];
+      const target = addTargetFolder || defaultFolder;
+      const isZip = folderZipMode === 'zip';
+
+      showAddModal = false;
+      addLinksInput = '';
+      detectedFolder = null;
+      resolveError = '';
+      folderZipMode = 'zip';
+
+      bulkAddingStatus = `Enqueuing ${linksToProcess.length} links...`;
+      try {
+        const res = await fetch('/api/downloads', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            links: linksToProcess,
+            target_folder: target,
+            zip_mode: isZip,
+            conflict_resolutions: {}
+          })
+        });
+        if (res.ok) {
+          bulkAddingStatus = `Added ${linksToProcess.length} links to queue.`;
+          fetchDownloads();
+          setTimeout(() => { bulkAddingStatus = ''; }, 3500);
+        } else {
+          const err = await res.json().catch(() => ({ error: 'Failed to enqueue links' }));
+          bulkAddingStatus = 'Error: ' + (err.error || 'Failed');
+          setTimeout(() => { bulkAddingStatus = ''; }, 5000);
+        }
+      } catch (e) {
+        bulkAddingStatus = 'Error: ' + e.message;
+        setTimeout(() => { bulkAddingStatus = ''; }, 5000);
+      }
+      return;
+    }
+
+    // Single link flow with fast precheck:
     isAdding = true;
     try {
-      // 1. Fast conflict precheck
       const checkRes = await fetch('/api/downloads/precheck', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -744,7 +860,6 @@
         }
       }
 
-      // 2. If no conflicts detected, download immediately
       await executeAddDownloads({});
     } catch (e) {
       alert('Error: ' + e.message);
@@ -1220,10 +1335,10 @@
       return;
     }
 
-    if (e.key === 'Delete' && selectedIds.length > 0) {
+    if (e.key === 'Delete' && selectedIds.length > 0 && !selectedItems.some(d => d.status === 'moving')) {
       e.preventDefault();
       openDeleteModal('selected', null, e.shiftKey);
-    } else if (e.key === ' ' && selectedIds.length > 0) {
+    } else if (e.key === ' ' && selectedIds.length > 0 && !selectedItems.some(d => d.status === 'moving')) {
       e.preventDefault();
       const hasActive = selectedItems.some(d => d.status === 'downloading' || d.status === 'queued');
       if (hasActive) {
@@ -1553,7 +1668,7 @@
       <!-- Start / Resume (IDM) -->
       <button
         class="tb-btn"
-        disabled={selectedIds.length === 0}
+        disabled={selectedIds.length === 0 || selectedItems.some(d => d.status === 'moving')}
         onclick={startSelected}
         title="Resume / Start selected download(s)"
       >
@@ -1566,7 +1681,7 @@
       <!-- Pause (IDM) -->
       <button
         class="tb-btn"
-        disabled={selectedIds.length === 0 || !selectedItems.some(d => d.status === 'downloading' || d.status === 'queued')}
+        disabled={selectedIds.length === 0 || !selectedItems.some(d => d.status === 'downloading' || d.status === 'queued') || selectedItems.some(d => d.status === 'moving')}
         onclick={pauseSelected}
         title="Pause selected download(s)"
       >
@@ -1580,7 +1695,7 @@
       <!-- Restart (IDM) -->
       <button
         class="tb-btn"
-        disabled={selectedIds.length === 0}
+        disabled={selectedIds.length === 0 || selectedItems.some(d => d.status === 'moving')}
         onclick={restartSelected}
         title="Restart selected download(s) from beginning"
       >
@@ -1593,7 +1708,7 @@
       <!-- Delete -->
       <button
         class="tb-btn"
-        disabled={selectedIds.length === 0}
+        disabled={selectedIds.length === 0 || selectedItems.some(d => d.status === 'moving')}
         onclick={() => openDeleteModal('selected', null, false)}
         title="Delete selected item(s) (Del)"
       >
@@ -1831,6 +1946,21 @@
 
     <!-- Main Content: Data Grid Table with Click-to-Sort & Resizable Columns -->
     <main class="content-pane">
+      {#if bulkAddingStatus}
+        <div class="bulk-adding-banner">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin-icon">
+            <line x1="12" y1="2" x2="12" y2="6"></line>
+            <line x1="12" y1="18" x2="12" y2="22"></line>
+            <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line>
+            <line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line>
+            <line x1="2" y1="12" x2="6" y2="12"></line>
+            <line x1="18" y1="12" x2="22" y2="12"></line>
+            <line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line>
+            <line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line>
+          </svg>
+          <span>{bulkAddingStatus}</span>
+        </div>
+      {/if}
       <div class="table-container">
         <table class="torrent-table">
           <colgroup>
@@ -2007,7 +2137,7 @@
                   <td class="col-size font-mono">{getItemSize(item)}</td>
                   <td class="col-done font-mono">{formatBytes(item.downloaded_bytes)}</td>
                   <td class="col-prog" style="width: {colWidths.prog}px; max-width: {colWidths.prog}px;">
-                    <div class="progress-cell" title={item.status === 'compressing' ? `Compressing ZIP: ${(item.compression_progress || 0).toFixed(1)}%` : (item.is_folder && item.total_files ? `${(item.percentage || 0).toFixed(1)}% (${item.completed_files || 0} of ${item.total_files} files)` : `${(item.percentage || (item.status === 'completed' || item.status === 'corrupted' ? 100 : 0)).toFixed(1)}%`)}>
+                    <div class="progress-cell" title={item.status === 'moving' ? `Moving file: ${(item.move_progress || 0).toFixed(1)}%` : item.status === 'compressing' ? `Compressing ZIP: ${(item.compression_progress || 0).toFixed(1)}%` : (item.is_folder && item.total_files ? `${(item.percentage || 0).toFixed(1)}% (${item.completed_files || 0} of ${item.total_files} files)` : `${(item.percentage || (item.status === 'completed' || item.status === 'corrupted' ? 100 : 0)).toFixed(1)}%`)}>
                       <div class="native-progress-track">
                         <div
                           class="native-progress-fill"
@@ -2016,11 +2146,14 @@
                           class:prog-paused={item.status === 'paused'}
                           class:prog-error={item.status === 'failed'}
                           class:prog-compressing={item.status === 'compressing'}
-                          style="width: {item.status === 'compressing' ? (item.compression_progress || 0) : (item.percentage || (item.status === 'completed' || item.status === 'corrupted' ? 100 : 0))}%"
+                          class:prog-moving={item.status === 'moving'}
+                          style="width: {item.status === 'moving' ? (item.move_progress || 0) : item.status === 'compressing' ? (item.compression_progress || 0) : (item.percentage || (item.status === 'completed' || item.status === 'corrupted' ? 100 : 0))}%"
                         ></div>
                       </div>
                       <span class="prog-label font-mono">
-                        {#if item.status === 'compressing'}
+                        {#if item.status === 'moving'}
+                          {(item.move_progress || 0).toFixed(0)}% (Moving)
+                        {:else if item.status === 'compressing'}
                           {colWidths.prog >= 130 ? `${(item.compression_progress || item.percentage || 0).toFixed(0)}% (ZIP)` : `${(item.compression_progress || item.percentage || 0).toFixed(0)}%`}
                         {:else if item.is_folder && item.total_files}
                           {#if colWidths.prog >= 150}
@@ -2058,12 +2191,18 @@
                           <rect x="1" y="3" width="22" height="5"></rect>
                           <line x1="10" y1="12" x2="14" y2="12"></line>
                         </svg>COMPRESSING</span>
+                    {:else if item.status === 'moving'}
+                      <span class="status-tag status-moving" title="Moving file across disks/folders">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 3px; vertical-align: middle;">
+                          <path d="M5 12h14"></path>
+                          <path d="M12 5l7 7-7 7"></path>
+                        </svg>MOVING ({(item.move_progress || 0).toFixed(0)}%)</span>
                     {:else}
                       <span class="status-tag status-{item.status}">{item.status}</span>
                     {/if}
                   </td>
                   <td class="col-speed font-mono">
-                    {item.status === 'downloading' ? formatSpeed(item.speed) : '--'}
+                    {item.status === 'downloading' || item.status === 'moving' ? formatSpeed(item.speed) : '--'}
                   </td>
                   <td class="col-eta font-mono">
                     {item.status === 'downloading' ? formatTime(item.eta_seconds) : '--'}
@@ -2232,7 +2371,7 @@
               <div>
                 <span class="prop-label">Save Path:</span>
                 <span class="prop-val">{selectedItem.target_folder}</span>
-                <button class="btn-browse-mini" style="margin-left: 6px; padding: 1px 6px; font-size: 11px;" onclick={() => openPickerFor('item', selectedItem.id)} title="Change save folder for this download">Change...</button>
+                <button class="btn-browse-mini" style="margin-left: 6px; padding: 1px 6px; font-size: 11px;" disabled={selectedItem.status === 'moving'} onclick={() => openPickerFor('item', selectedItem.id)} title="Change save folder for this download">Change...</button>
               </div>
               <div><span class="prop-label">Added / Last Try:</span> <span class="prop-val font-mono">{formatDateTime(selectedItem.created_at)} / {formatDateTime(selectedItem.last_try_at)}</span></div>
               {#if selectedItem.current_file}
@@ -2323,6 +2462,13 @@
       {#if hasLogin}
         <span class="sb-badge-auth">Google Session Active</span>
       {/if}
+      {#if bulkAddingStatus}
+        <span class="sb-divider">|</span>
+        <span style="color: var(--accent-blue); display: inline-flex; align-items: center; gap: 4px;">
+          <span class="status-indicator active-dot"></span>
+          {bulkAddingStatus}
+        </span>
+      {/if}
     </div>
 
     <div class="sb-section">
@@ -2361,7 +2507,7 @@
       {#if contextMenuItem ? (contextMenuItem.status === 'downloading' || contextMenuItem.status === 'queued' || contextMenuItem.status === 'compressing') : selectedItems.some(d => d.status === 'downloading' || d.status === 'queued' || d.status === 'compressing')}
         <button
           class="context-item"
-          disabled={selectedIds.length === 0}
+          disabled={selectedIds.length === 0 || selectedItems.some(d => d.status === 'moving')}
           onclick={() => { pauseSelected(); closeContextMenu(); }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -2374,7 +2520,7 @@
       {:else}
         <button
           class="context-item"
-          disabled={selectedIds.length === 0}
+          disabled={selectedIds.length === 0 || selectedItems.some(d => d.status === 'moving')}
           onclick={() => { startSelected(); closeContextMenu(); }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -2386,7 +2532,7 @@
 
         <button
           class="context-item"
-          disabled={selectedIds.length === 0}
+          disabled={selectedIds.length === 0 || selectedItems.some(d => d.status === 'moving')}
           onclick={() => { restartSelected(); closeContextMenu(); }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -2451,6 +2597,7 @@
       {#if contextMenuItem || selectedItem}
         <button
           class="context-item"
+          disabled={(contextMenuItem ? contextMenuItem.status : selectedItem?.status) === 'moving'}
           onclick={() => {
             const targetId = contextMenuItem ? contextMenuItem.id : (selectedItem ? selectedItem.id : null);
             if (targetId) openPickerFor('item', targetId);
@@ -2468,7 +2615,7 @@
       <!-- Delete -->
       <button
         class="context-item text-danger"
-        disabled={selectedIds.length === 0}
+        disabled={selectedIds.length === 0 || selectedItems.some(d => d.status === 'moving')}
         onclick={() => { openDeleteModal('selected', null, false); closeContextMenu(); }}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -2849,12 +2996,12 @@
     </div>
   {/if}
 
-  <!-- Modal: One-Time Login (Google Cookie Session) -->
+  <!-- Modal: Google Account Cookie Pool & Rotation Manager -->
   {#if showLoginModal}
     <div class="modal-overlay" role="presentation" onclick={() => showLoginModal = false} onkeydown={(e) => e.key === 'Escape' && (showLoginModal = false)}>
-      <div class="modal-window" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+      <div class="modal-window" role="dialog" aria-modal="true" tabindex="-1" style="max-width: 580px;" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
         <div class="modal-header">
-          <span>One-Time Google Login (Cookie Session)</span>
+          <span>Google Account Cookie Pool (Auto-Failover)</span>
           <button class="modal-close" aria-label="Close" onclick={() => showLoginModal = false}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -2865,36 +3012,84 @@
 
         <div class="modal-body">
           <div class="auth-status-banner">
-            <span class="status-indicator" class:active-dot={hasLogin} class:failed-dot={!hasLogin}></span>
-            <span>Status: <strong>{hasLogin ? 'Logged in with Google Session Cookie' : 'Guest / Anonymous (Public files only)'}</strong></span>
+            <span class="status-indicator" class:active-dot={cookieList.length > 0} class:failed-dot={cookieList.length === 0}></span>
+            <span>Pool Status: <strong>{cookieList.length > 0 ? `${cookieList.filter(c => !c.is_exhausted).length} of ${cookieList.length} Accounts Ready` : 'No accounts configured (using anonymous public IP quota)'}</strong></span>
           </div>
 
-          <div class="form-group" style="margin-top: 1rem;">
-            <span class="form-title">Paste Google Drive Cookie:</span>
-            <textarea
-              bind:value={loginCookieInput}
-              rows="4"
-              placeholder="Paste your Cookie header string here (e.g. SID=...; HSID=...; SSID=...; SAPISID=...; APISID=...)"
-            ></textarea>
-            <span class="form-hint" style="display: flex; align-items: flex-start; gap: 6px; margin-top: 6px;">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink: 0; margin-top: 2px;">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="16" x2="12" y2="12"></line>
-                <line x1="12" y1="8" x2="12.01" y2="8"></line>
-              </svg>
-              <span><strong>How to get your Cookie:</strong> Open Google Drive in Chrome/Edge &gt; Press F12 (DevTools) &gt; Open the <em>Network</em> or <em>Application &gt; Cookies</em> tab &gt; Copy the Cookie header string. Stored securely only on your local machine.</span>
-            </span>
+          <span class="form-hint" style="margin-top: 0.5rem; margin-bottom: 0.75rem;">
+            Add multiple Google accounts to bypass Google's daily "Download quota exceeded" limit. If an account is locked out by Google, GDDL automatically switches to the next account and restarts cleanly.
+          </span>
+
+          {#if cookieError}
+            <div style="color: var(--accent-red); font-size: 11px; background: rgba(248,81,73,0.1); padding: 5px 8px; border-radius: 4px; margin-bottom: 8px;">{cookieError}</div>
+          {/if}
+          {#if cookieMessage}
+            <div style="color: var(--accent-green); font-size: 11px; background: rgba(46,160,67,0.1); padding: 5px 8px; border-radius: 4px; margin-bottom: 8px;">{cookieMessage}</div>
+          {/if}
+
+          <!-- Existing Accounts List -->
+          {#if cookieList.length > 0}
+            <div class="cookie-pool-container" style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; max-height: 200px; overflow-y: auto;">
+              {#each cookieList as c}
+                <div style="background: var(--table-row-alt); border: 1px solid var(--border-subtle); padding: 8px 10px; border-radius: 5px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                  <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <span style="font-weight: 600; font-size: 12px; color: var(--text-main);">{c.label}</span>
+                      {#if c.is_exhausted}
+                        <span class="concurrency-badge badge-aggressive" style="font-size: 9px; padding: 1px 5px;">Cooldown ({c.cooldown_left})</span>
+                      {:else}
+                        <span class="concurrency-badge badge-safe" style="font-size: 9px; padding: 1px 5px;">Active</span>
+                      {/if}
+                    </div>
+                    <span style="font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">{c.masked_cookie}</span>
+                  </div>
+
+                  <div style="display: flex; gap: 5px; flex-shrink: 0;">
+                    {#if c.is_exhausted}
+                      <button class="btn btn-secondary" onclick={() => resetCookieCooldown(c.id)} style="font-size: 10px; padding: 2px 7px;">
+                        Reset
+                      </button>
+                    {/if}
+                    <button class="btn btn-secondary" onclick={() => removeCookie(c.id)} style="font-size: 10px; padding: 2px 7px; color: var(--accent-red);">
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          <!-- Add Account Form -->
+          <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 8px;">
+            <span style="font-weight: 600; font-size: 12px; color: var(--accent-blue);">+ Add Google Account Cookie</span>
+
+            <div style="display: grid; grid-template-columns: 110px 1fr; gap: 8px; align-items: center;">
+              <span style="font-size: 11px; color: var(--text-muted);">Account Label:</span>
+              <input type="text" bind:value={newCookieLabel} placeholder="e.g. Gmail Utama, Gmail 2..." style="padding: 4px 8px; font-size: 12px;" />
+
+              <span style="font-size: 11px; color: var(--text-muted);">Cookie String:</span>
+              <textarea
+                bind:value={newCookieValue}
+                rows="3"
+                placeholder="Paste Cookie header string (SID=...; HSID=...)"
+                style="padding: 4px 8px; font-size: 11px; font-family: var(--font-mono); resize: vertical;"
+              ></textarea>
+            </div>
+
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
+              <span style="font-size: 10px; color: var(--text-dim);">DevTools (F12) &gt; Network &gt; Request Headers &gt; Cookie</span>
+              <button class="btn btn-primary" disabled={!newCookieValue.trim() || isAddingCookie} onclick={addCookieToPool} style="font-size: 11px; padding: 4px 12px;">
+                {isAddingCookie ? 'Adding...' : 'Add Account to Pool'}
+              </button>
+            </div>
           </div>
         </div>
 
         <div class="modal-footer">
-          {#if hasLogin}
-            <button class="btn btn-danger" onclick={logoutGoogle}>Clear / Logout</button>
+          {#if cookieList.length > 0}
+            <button class="btn btn-danger" onclick={logoutGoogle} style="margin-right: auto;">Clear All Accounts</button>
           {/if}
-          <button class="btn btn-secondary" onclick={() => showLoginModal = false}>Cancel</button>
-          <button class="btn btn-primary" disabled={isSavingLogin || !loginCookieInput.trim()} onclick={saveGoogleLogin}>
-            {isSavingLogin ? 'Saving...' : 'Save & Login'}
-          </button>
+          <button class="btn btn-secondary" onclick={() => showLoginModal = false}>Close</button>
         </div>
       </div>
     </div>
@@ -3012,6 +3207,32 @@
                 </div>
               </div>
             {/if}
+          </div>
+
+          <!-- Divider -->
+          <div style="border-top: 1px solid var(--border-color); margin: 1.25rem 0 1rem 0;"></div>
+
+          <!-- Google Account Cookie Pool Section -->
+          <div class="form-group">
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+              <span class="form-title" style="font-weight: 600; color: var(--accent-blue);">Google Account Cookie Pool (Bypass Quota Limits)</span>
+              <span class="concurrency-badge {cookieList.filter(c => !c.is_exhausted).length > 0 ? 'badge-safe' : 'badge-aggressive'}">
+                {cookieList.filter(c => !c.is_exhausted).length} of {cookieList.length} Accounts Active
+              </span>
+            </div>
+            <span class="form-hint" style="margin-bottom: 0.5rem;">
+              Bypass Google's daily "Download quota exceeded" lockouts with multi-account rotation and clean auto-failover.
+            </span>
+
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <button class="btn btn-secondary" onclick={() => { showSettingsModal = false; showLoginModal = true; }} style="display: flex; align-items: center; gap: 6px;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <path d="M12 8v8M8 12h8"></path>
+                </svg>
+                <span>Manage Cookie Pool ({cookieList.length} Accounts)...</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -3699,6 +3920,25 @@
   .native-progress-fill.prog-paused { background: var(--accent-amber); }
   .native-progress-fill.prog-error { background: var(--accent-red); }
   .native-progress-fill.prog-compressing { background: #a855f7; }
+  .native-progress-fill.prog-moving {
+    background: #0284c7;
+    background-image: linear-gradient(
+      45deg,
+      rgba(255, 255, 255, 0.2) 25%,
+      transparent 25%,
+      transparent 50%,
+      rgba(255, 255, 255, 0.2) 50%,
+      rgba(255, 255, 255, 0.2) 75%,
+      transparent 75%,
+      transparent
+    );
+    background-size: 1rem 1rem;
+    animation: move-stripes 1s linear infinite;
+  }
+  @keyframes move-stripes {
+    from { background-position: 1rem 0; }
+    to { background-position: 0 0; }
+  }
   .prog-label {
     flex-shrink: 0;
     font-size: 0.72rem;
@@ -3719,6 +3959,7 @@
   }
   .status-downloading { background: rgba(56, 139, 253, 0.18); color: var(--accent-blue); }
   .status-compressing { background: rgba(168, 85, 247, 0.22); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.4); }
+  .status-moving { background: rgba(56, 189, 248, 0.22); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
   .status-queued { background: rgba(210, 153, 34, 0.18); color: var(--accent-amber); }
   .status-paused { background: rgba(234, 179, 8, 0.18); color: #eab308; }
   .status-completed { background: rgba(46, 160, 67, 0.18); color: var(--accent-green); }
@@ -3728,6 +3969,24 @@
   .status-corrupted { background: rgba(248, 81, 73, 0.25); color: var(--accent-red); border: 1px solid var(--accent-red); }
   .status-failed { background: rgba(248, 81, 73, 0.18); color: var(--accent-red); }
   .status-cancelled { background: var(--border-subtle); color: var(--text-dim); }
+  .bulk-adding-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: rgba(56, 139, 253, 0.12);
+    border-bottom: 1px solid rgba(56, 139, 253, 0.3);
+    color: var(--accent-blue);
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .spin-icon {
+    animation: spin-pulse 1s linear infinite;
+  }
+  @keyframes spin-pulse {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
   .discord-tag {
     font-size: 0.62rem;
     font-weight: 800;

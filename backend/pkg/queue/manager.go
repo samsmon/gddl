@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,7 @@ const (
 	StatusQueued      DownloadStatus = "queued"
 	StatusDownloading DownloadStatus = "downloading"
 	StatusCompressing DownloadStatus = "compressing"
+	StatusMoving      DownloadStatus = "moving"
 	StatusPaused      DownloadStatus = "paused"
 	StatusCompleted   DownloadStatus = "completed"
 	StatusFailed      DownloadStatus = "failed"
@@ -78,6 +81,7 @@ type DownloadItem struct {
 	CompletedFiles      int                     `json:"completed_files,omitempty"`
 	CurrentFile         string                  `json:"current_file,omitempty"`
 	CompressionProgress float64                 `json:"compression_progress,omitempty"`
+	MoveProgress        float64                 `json:"move_progress,omitempty"`
 	FolderFiles         []ChildFileItem         `json:"folder_files,omitempty"`
 	folderFiles         []gdrive.FolderFileInfo `json:"-"`
 
@@ -116,6 +120,7 @@ func (it *DownloadItem) Snapshot() DownloadItem {
 		CompletedFiles:      it.CompletedFiles,
 		CurrentFile:         it.CurrentFile,
 		CompressionProgress: it.CompressionProgress,
+		MoveProgress:        it.MoveProgress,
 		FolderFiles:         childFiles,
 	}
 }
@@ -367,7 +372,7 @@ func (m *Manager) worker() {
 		}
 
 		var desiredName string
-		if item.Filename != "" && !strings.HasPrefix(item.Filename, "File ") && !strings.HasPrefix(item.Filename, "Folder ") {
+		if item.Filename != "" && !strings.HasPrefix(item.Filename, "File ") && !strings.HasPrefix(item.Filename, "Folder ") && !strings.HasPrefix(item.Filename, "Google Drive File [") {
 			desiredName = item.Filename
 		}
 
@@ -819,13 +824,16 @@ func (m *Manager) PrecheckDownloads(rawURLs []string, targetFolder string, zipMo
 			m.mu.RUnlock()
 
 			if expectedFilename == "" {
-				fn, _, err := m.downloader.GetFileInfo(ctx, fileID)
-				if err == nil && fn != "" {
-					expectedFilename = fn
-					title = fn
-				} else {
+				if len(rawURLs) <= 1 {
+					fn, _, err := m.downloader.GetFileInfo(ctx, fileID)
+					if err == nil && fn != "" {
+						expectedFilename = fn
+						title = fn
+					}
+				}
+				if expectedFilename == "" {
 					expectedFilename = fmt.Sprintf("gdrive_%s.bin", fileID)
-					title = expectedFilename
+					title = fmt.Sprintf("Google Drive File [%s]", fileID)
 				}
 			}
 		}
@@ -1190,10 +1198,10 @@ func (m *Manager) AddWithResolutions(rawURLs []string, targetFolder string, zipM
 		m.mu.RUnlock()
 
 		if !isDiscord {
-			fn = fmt.Sprintf("File %s", fileID)
-			if existingItem != nil && existingItem.Filename != "" && !strings.HasPrefix(existingItem.Filename, "File ") {
+			fn = fmt.Sprintf("Google Drive File [%s]", fileID)
+			if existingItem != nil && existingItem.Filename != "" && !strings.HasPrefix(existingItem.Filename, "Google Drive File [") {
 				fn = existingItem.Filename
-			} else {
+			} else if len(rawURLs) <= 1 {
 				realFn, _, err := m.downloader.GetFileInfo(context.Background(), fileID)
 				if err == nil && realFn != "" {
 					fn = realFn
@@ -1203,10 +1211,8 @@ func (m *Manager) AddWithResolutions(rawURLs []string, targetFolder string, zipM
 			if existingItem != nil && existingItem.Filename != "" {
 				fn = existingItem.Filename
 			} else {
-				realFn, _, err := m.discordDownloader.GetFileInfo(context.Background(), rawURL)
-				if err == nil && realFn != "" {
-					fn = realFn
-				}
+				// fileID is already the filename extracted from Discord URL
+				fn = fileID
 			}
 		}
 
@@ -1445,37 +1451,272 @@ func (m *Manager) SetItemTargetFolder(id string, newFolder string) error {
 	}
 
 	item.mu.Lock()
-	oldFolder := item.TargetFolder
-	item.TargetFolder = newFolder
-
-	// If file was already downloaded to oldFolder, try moving it to newFolder if it exists
-	if oldFolder != "" && oldFolder != newFolder {
-		oldPath := filepath.Join(oldFolder, item.Filename)
-		newPath := filepath.Join(newFolder, item.Filename)
-		if fi, err := os.Stat(oldPath); err == nil && !fi.IsDir() {
-			_ = os.MkdirAll(newFolder, 0755)
-			if err := os.Rename(oldPath, newPath); err != nil {
-				logger.Warnf("Queue", "Could not move existing file to new folder: %v", err)
-			} else {
-				logger.Infof("Queue", "Moved completed file from '%s' to '%s'", oldPath, newPath)
-			}
-		}
-		// Also move .part file if any
-		oldPart := oldPath + ".part"
-		newPart := newPath + ".part"
-		if _, err := os.Stat(oldPart); err == nil {
-			_ = os.MkdirAll(newFolder, 0755)
-			_ = os.Rename(oldPart, newPart)
-		}
+	if item.Status == StatusMoving {
+		item.mu.Unlock()
+		return fmt.Errorf("file is already being moved")
 	}
+	if item.Status == StatusDownloading || item.Status == StatusCompressing {
+		item.mu.Unlock()
+		return fmt.Errorf("cannot move file while downloading or compressing; please pause download first")
+	}
+
+	oldFolder := item.TargetFolder
+	itemFilename := item.Filename
+	if item.IsFolder && !item.ZipMode && item.FolderTitle != "" {
+		itemFilename = item.FolderTitle
+	}
+	prevStatus := item.Status
 	item.mu.Unlock()
 
-	// Recheck existence in case it was missing
-	go m.CheckFileExistence(id)
+	if oldFolder == newFolder {
+		return nil
+	}
 
-	logger.Infof("Queue", "Changed save location of '%s' to '%s'", item.Filename, newFolder)
-	m.triggerBroadcast()
-	m.saveToDisk()
+	oldPath := filepath.Join(oldFolder, itemFilename)
+	newPath := filepath.Join(newFolder, itemFilename)
+	oldPart := oldPath + ".part"
+	newPart := newPath + ".part"
+
+	hasFile := false
+	if _, err := os.Stat(oldPath); err == nil {
+		hasFile = true
+	}
+	hasPart := false
+	if fi, err := os.Stat(oldPart); err == nil && !fi.IsDir() {
+		hasPart = true
+	}
+
+	// If no physical file or .part file exists on disk yet, simply update target folder
+	if !hasFile && !hasPart {
+		item.mu.Lock()
+		item.TargetFolder = newFolder
+		item.mu.Unlock()
+		go m.CheckFileExistence(id)
+		m.triggerBroadcast()
+		m.saveToDisk()
+		logger.Infof("Queue", "Changed target location of queued item '%s' to '%s'", itemFilename, newFolder)
+		return nil
+	}
+
+	// File exists on disk: perform move asynchronously with real-time progress
+	go func() {
+		item.mu.Lock()
+		item.Status = StatusMoving
+		item.MoveProgress = 0
+		item.Speed = 0
+		item.mu.Unlock()
+		m.triggerBroadcast()
+
+		var moveErr error
+		if hasFile {
+			moveErr = m.moveFileWithProgress(item, oldPath, newPath)
+		} else if hasPart {
+			moveErr = m.moveFileWithProgress(item, oldPart, newPart)
+		}
+
+		item.mu.Lock()
+		if moveErr == nil {
+			item.TargetFolder = newFolder
+			item.Status = prevStatus
+			item.MoveProgress = 100
+			item.Speed = 0
+			logger.Infof("Queue", "Successfully moved '%s' from '%s' to '%s'", itemFilename, oldFolder, newFolder)
+		} else {
+			item.Status = prevStatus
+			item.MoveProgress = 0
+			item.Speed = 0
+			logger.Errorf("Queue", "Failed to move '%s' to '%s': %v", itemFilename, newFolder, moveErr)
+		}
+		item.mu.Unlock()
+
+		m.CheckFileExistence(id)
+		m.triggerBroadcast()
+		m.saveToDisk()
+	}()
+
+	return nil
+}
+
+func (m *Manager) moveFileWithProgress(item *DownloadItem, oldPath string, newPath string) error {
+	_ = os.MkdirAll(filepath.Dir(newPath), 0755)
+
+	// 1. Try atomic rename first (instant if on the same disk/volume)
+	if err := os.Rename(oldPath, newPath); err == nil {
+		item.mu.Lock()
+		item.MoveProgress = 100
+		item.mu.Unlock()
+		m.triggerBroadcast()
+		return nil
+	}
+
+	srcStat, err := os.Stat(oldPath)
+	if err != nil {
+		return err
+	}
+
+	if srcStat.IsDir() {
+		return m.moveDirWithProgress(item, oldPath, newPath)
+	}
+
+	// 2. Cross-device move fallback (stream copy with real-time progress)
+	src, err := os.Open(oldPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	totalSize := srcStat.Size()
+
+	dst, err := os.OpenFile(newPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+
+	buf := make([]byte, 4*1024*1024) // 4MB buffer
+	var copied int64
+	lastReport := time.Now()
+	lastCopied := int64(0)
+
+	for {
+		nr, rerr := src.Read(buf)
+		if nr > 0 {
+			nw, werr := dst.Write(buf[:nr])
+			if werr != nil {
+				dst.Close()
+				_ = os.Remove(newPath)
+				return werr
+			}
+			copied += int64(nw)
+
+			now := time.Now()
+			elapsed := now.Sub(lastReport)
+			if elapsed >= 200*time.Millisecond || copied == totalSize {
+				var speed int64
+				if elapsed.Seconds() > 0 {
+					speed = int64(float64(copied-lastCopied) / elapsed.Seconds())
+				}
+				item.mu.Lock()
+				if totalSize > 0 {
+					item.MoveProgress = math.Round((float64(copied)/float64(totalSize))*1000) / 10
+				}
+				item.Speed = speed
+				item.mu.Unlock()
+				m.triggerBroadcast()
+
+				lastReport = now
+				lastCopied = copied
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			dst.Close()
+			_ = os.Remove(newPath)
+			return rerr
+		}
+	}
+
+	_ = dst.Sync()
+	_ = dst.Close()
+	_ = src.Close()
+
+	// Verify target file size before deleting source
+	if dstStat, err := os.Stat(newPath); err == nil && dstStat.Size() == totalSize {
+		_ = os.Remove(oldPath)
+		return nil
+	}
+
+	return fmt.Errorf("copied file size mismatch")
+}
+
+func (m *Manager) moveDirWithProgress(item *DownloadItem, oldDir string, newDir string) error {
+	var totalSize int64
+	var fileList []string
+
+	err := filepath.Walk(oldDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			totalSize += info.Size()
+			fileList = append(fileList, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	var copied int64
+	lastReport := time.Now()
+	lastCopied := int64(0)
+	buf := make([]byte, 4*1024*1024)
+
+	for _, srcPath := range fileList {
+		rel, err := filepath.Rel(oldDir, srcPath)
+		if err != nil {
+			return err
+		}
+		destPath := filepath.Join(newDir, rel)
+		_ = os.MkdirAll(filepath.Dir(destPath), 0755)
+
+		src, err := os.Open(srcPath)
+		if err != nil {
+			return err
+		}
+
+		dst, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			src.Close()
+			return err
+		}
+
+		for {
+			nr, rerr := src.Read(buf)
+			if nr > 0 {
+				nw, werr := dst.Write(buf[:nr])
+				if werr != nil {
+					src.Close()
+					dst.Close()
+					return werr
+				}
+				copied += int64(nw)
+
+				now := time.Now()
+				elapsed := now.Sub(lastReport)
+				if elapsed >= 200*time.Millisecond || copied == totalSize {
+					var speed int64
+					if elapsed.Seconds() > 0 {
+						speed = int64(float64(copied-lastCopied) / elapsed.Seconds())
+					}
+					item.mu.Lock()
+					if totalSize > 0 {
+						item.MoveProgress = math.Round((float64(copied)/float64(totalSize))*1000) / 10
+					}
+					item.Speed = speed
+					item.mu.Unlock()
+					m.triggerBroadcast()
+
+					lastReport = now
+					lastCopied = copied
+				}
+			}
+			if rerr != nil {
+				if rerr == io.EOF {
+					break
+				}
+				src.Close()
+				dst.Close()
+				return rerr
+			}
+		}
+		_ = dst.Sync()
+		dst.Close()
+		src.Close()
+	}
+
+	_ = os.RemoveAll(oldDir)
 	return nil
 }
 

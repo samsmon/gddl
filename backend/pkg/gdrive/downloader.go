@@ -101,10 +101,15 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+type CookieProvider func(excludeID ...string) (cookie string, cookieID string, hasMore bool)
+type CookieExhaustedNotifier func(cookieID string)
+
 type Downloader struct {
-	client       *http.Client
-	cookieLock   sync.RWMutex
-	googleCookie string
+	client                  *http.Client
+	cookieLock              sync.RWMutex
+	googleCookie            string
+	cookieProvider          CookieProvider
+	cookieExhaustedNotifier CookieExhaustedNotifier
 }
 
 func NewDownloader() (*Downloader, error) {
@@ -151,6 +156,13 @@ func (d *Downloader) SetGoogleCookie(cookie string) {
 	d.googleCookie = strings.TrimSpace(cookie)
 }
 
+func (d *Downloader) SetCookieProvider(provider CookieProvider, onExhausted CookieExhaustedNotifier) {
+	d.cookieLock.Lock()
+	defer d.cookieLock.Unlock()
+	d.cookieProvider = provider
+	d.cookieExhaustedNotifier = onExhausted
+}
+
 func (d *Downloader) GetGoogleCookie() string {
 	d.cookieLock.RLock()
 	defer d.cookieLock.RUnlock()
@@ -164,233 +176,272 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 
 	logger.Infof("Download", "Initiating download for file ID '%s' into '%s'", fileID, targetFolder)
 
-	initialURL := fmt.Sprintf("https://drive.usercontent.google.com/download?id=%s&export=download&authuser=0&confirm=t", fileID)
-	req, err := http.NewRequestWithContext(ctx, "GET", initialURL, nil)
-	if err != nil {
-		return "", 0, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+	currentCookie := d.GetGoogleCookie()
+	currentCookieID := "primary"
+	d.cookieLock.RLock()
+	provider := d.cookieProvider
+	notifier := d.cookieExhaustedNotifier
+	d.cookieLock.RUnlock()
 
-	// Attach Google Account session cookie if configured
-	if cookie := d.GetGoogleCookie(); cookie != "" {
-		req.Header.Set("Cookie", cookie)
-	}
-
-	resp, err := d.client.Do(req)
-	if err != nil {
-		if ctx.Err() == nil && !strings.Contains(err.Error(), "context canceled") {
-			logger.Errorf("Download", "HTTP request error for %s: %v", fileID, err)
+	if provider != nil {
+		if c, id, ok := provider(); ok {
+			currentCookie = c
+			currentCookieID = id
 		}
-		return "", 0, err
 	}
 
-	finalResp := resp
-	var fallbackHTMLFilename string
-
-	// Check if Google returned an HTML page (virus scan warning or confirmation form)
-	contentType := resp.Header.Get("Content-Type")
-	if strings.Contains(contentType, "text/html") {
-		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*512))
-		resp.Body.Close()
-		if err != nil {
-			return "", 0, fmt.Errorf("failed reading response HTML: %w", err)
-		}
-		bodyStr := string(bodyBytes)
-
-		// Check known Google errors
-		if strings.Contains(bodyStr, "Quota exceeded") || strings.Contains(bodyStr, "Too many users have viewed or downloaded") {
-			errMsg := "Google Drive download quota exceeded for this file (Google Account cookie required in Tools > Google Cookie)"
-			logger.Errorf("Download", "File %s: %s", fileID, errMsg)
-			return "", 0, errors.New(errMsg)
-		}
-		if strings.Contains(bodyStr, "Access denied") || strings.Contains(bodyStr, "You need access") {
-			errMsg := "Access denied: link requires Google login or private folder access"
-			logger.Errorf("Download", "File %s: %s", fileID, errMsg)
-			return "", 0, errors.New(errMsg)
-		}
-		if strings.Contains(bodyStr, "docs.google.com/spreadsheets") || strings.Contains(bodyStr, "docs.google.com/document") {
-			errMsg := "Google Docs/Sheets online document (cannot be downloaded directly as binary file)"
-			logger.Errorf("Download", "File %s: %s", fileID, errMsg)
-			return "", 0, errors.New(errMsg)
-		}
-
-		// Extract filename from HTML if available
-		if fnMatches := htmlFilenamePattern.FindStringSubmatch(bodyStr); len(fnMatches) > 1 {
-			fallbackHTMLFilename = html.UnescapeString(fnMatches[1])
-		}
-
-		// Parse form fields from #download-form
-		formAction := "https://drive.usercontent.google.com/download"
-		if actionMatches := formActionPattern.FindStringSubmatch(bodyStr); len(actionMatches) > 1 {
-			formAction = actionMatches[1]
-			if strings.HasPrefix(formAction, "/") {
-				formAction = "https://drive.google.com" + formAction
-			}
-		}
-
-		// Gather query params from hidden input fields
-		queryParams := url.Values{}
-		for _, match := range inputFieldPattern1.FindAllStringSubmatch(bodyStr, -1) {
-			if len(match) > 2 && match[1] != "" {
-				queryParams.Set(match[1], match[2])
-			}
-		}
-		for _, match := range inputFieldPattern2.FindAllStringSubmatch(bodyStr, -1) {
-			if len(match) > 2 && match[2] != "" && queryParams.Get(match[2]) == "" {
-				queryParams.Set(match[2], match[1])
-			}
-		}
-
-		if queryParams.Get("id") == "" {
-			queryParams.Set("id", fileID)
-		}
-		if queryParams.Get("export") == "" {
-			queryParams.Set("export", "download")
-		}
-		if queryParams.Get("confirm") == "" {
-			queryParams.Set("confirm", "t")
-		}
-
-		logger.Infof("Download", "File %s: Bypassing Google virus/size warning form", fileID)
-
-		nextURL := fmt.Sprintf("%s?%s", formAction, queryParams.Encode())
-
-		nextReq, err := http.NewRequestWithContext(ctx, "GET", nextURL, nil)
+	for attempt := 0; attempt < 5; attempt++ {
+		initialURL := fmt.Sprintf("https://drive.usercontent.google.com/download?id=%s&export=download&authuser=0&confirm=t", fileID)
+		req, err := http.NewRequestWithContext(ctx, "GET", initialURL, nil)
 		if err != nil {
 			return "", 0, err
 		}
-		nextReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-		if cookie := d.GetGoogleCookie(); cookie != "" {
-			nextReq.Header.Set("Cookie", cookie)
+		if currentCookie != "" {
+			req.Header.Set("Cookie", currentCookie)
 		}
 
-		finalResp, err = d.client.Do(nextReq)
+		resp, err := d.client.Do(req)
 		if err != nil {
 			if ctx.Err() == nil && !strings.Contains(err.Error(), "context canceled") {
-				logger.Errorf("Download", "Second-stage download error for %s: %v", fileID, err)
+				logger.Errorf("Download", "HTTP request error for %s: %v", fileID, err)
 			}
 			return "", 0, err
 		}
 
-		if strings.Contains(finalResp.Header.Get("Content-Type"), "text/html") {
-			finalBytes, _ := io.ReadAll(io.LimitReader(finalResp.Body, 1024*64))
-			finalResp.Body.Close()
-			content := string(finalBytes)
-			if strings.Contains(content, "Quota exceeded") {
-				errMsg := "Google Drive quota exceeded for this file (Google Account cookie required)"
+		finalResp := resp
+		var fallbackHTMLFilename string
+
+		// Check if Google returned an HTML page (virus scan warning or confirmation form)
+		contentType := resp.Header.Get("Content-Type")
+		if strings.Contains(contentType, "text/html") {
+			bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*512))
+			resp.Body.Close()
+			if err != nil {
+				return "", 0, fmt.Errorf("failed reading response HTML: %w", err)
+			}
+			bodyStr := string(bodyBytes)
+
+			// Check known Google errors
+			if strings.Contains(bodyStr, "Quota exceeded") || strings.Contains(bodyStr, "Too many users have viewed or downloaded") {
+				if notifier != nil && currentCookieID != "" {
+					notifier(currentCookieID)
+				}
+				if provider != nil {
+					if nextCookie, nextID, ok := provider(currentCookieID); ok {
+						logger.Warnf("Download", "File %s: Google Drive quota exceeded on account '%s'. Auto-switching to account '%s' and restarting clean download...", fileID, currentCookieID, nextID)
+						currentCookie = nextCookie
+						currentCookieID = nextID
+						continue
+					}
+				}
+				errMsg := "Google Drive download quota exceeded for this file (all available accounts in Cookie Pool exhausted / 24h cooldown)"
 				logger.Errorf("Download", "File %s: %s", fileID, errMsg)
 				return "", 0, errors.New(errMsg)
 			}
-			errMsg := "Google Drive returned HTML instead of file (file may require private access or login)"
-			logger.Errorf("Download", "File %s: %s", fileID, errMsg)
-			return "", 0, errors.New(errMsg)
-		}
-	}
-	defer finalResp.Body.Close()
-
-	var filename string
-	var destPath string
-
-	if len(desiredFilename) > 0 && desiredFilename[0] != "" {
-		filename = sanitizeFilename(desiredFilename[0])
-		destPath = filepath.Join(targetFolder, filename)
-	} else {
-		// Extract filename from header or HTML fallback
-		filename = extractFilename(finalResp.Header.Get("Content-Disposition"))
-		if filename == "" && fallbackHTMLFilename != "" {
-			filename = fallbackHTMLFilename
-		}
-		if filename == "" {
-			filename = fmt.Sprintf("gdrive_%s.bin", fileID)
-		}
-		filename = sanitizeFilename(filename)
-		destPath = uniqueFilePath(filepath.Join(targetFolder, filename))
-		filename = filepath.Base(destPath)
-	}
-
-	totalSize := finalResp.ContentLength
-	if totalSize < 0 {
-		totalSize = 0
-	}
-
-	var out *os.File
-	var startOffset int64 = 0
-
-	// Check if destination file exists on disk and is partially downloaded
-	if fi, statErr := os.Stat(destPath); statErr == nil && fi.Size() > 0 && totalSize > 0 && fi.Size() < totalSize {
-		// Attempt HTTP Range resume
-		reqURL := finalResp.Request.URL.String()
-		rangeReq, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
-		if err == nil {
-			rangeReq.Header.Set("Range", fmt.Sprintf("bytes=%d-", fi.Size()))
-			rangeReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-			if cookie := d.GetGoogleCookie(); cookie != "" {
-				rangeReq.Header.Set("Cookie", cookie)
+			if strings.Contains(bodyStr, "Access denied") || strings.Contains(bodyStr, "You need access") {
+				errMsg := "Access denied: link requires Google login or private folder access"
+				logger.Errorf("Download", "File %s: %s", fileID, errMsg)
+				return "", 0, errors.New(errMsg)
 			}
-			rangeResp, err := d.client.Do(rangeReq)
-			if err == nil && rangeResp.StatusCode == http.StatusPartialContent {
-				finalResp.Body.Close()
-				finalResp = rangeResp
-				out, err = os.OpenFile(destPath, os.O_WRONLY|os.O_APPEND, 0644)
-				if err == nil {
-					startOffset = fi.Size()
-					logger.Infof("Download", "Resuming '%s' from byte %d / %d", filename, startOffset, totalSize)
+			if strings.Contains(bodyStr, "docs.google.com/spreadsheets") || strings.Contains(bodyStr, "docs.google.com/document") {
+				errMsg := "Google Docs/Sheets online document (cannot be downloaded directly as binary file)"
+				logger.Errorf("Download", "File %s: %s", fileID, errMsg)
+				return "", 0, errors.New(errMsg)
+			}
+
+			// Extract filename from HTML if available
+			if fnMatches := htmlFilenamePattern.FindStringSubmatch(bodyStr); len(fnMatches) > 1 {
+				fallbackHTMLFilename = html.UnescapeString(fnMatches[1])
+			}
+
+			// Parse form fields from #download-form
+			formAction := "https://drive.usercontent.google.com/download"
+			if actionMatches := formActionPattern.FindStringSubmatch(bodyStr); len(actionMatches) > 1 {
+				formAction = actionMatches[1]
+				if strings.HasPrefix(formAction, "/") {
+					formAction = "https://drive.google.com" + formAction
 				}
-			} else if rangeResp != nil {
-				rangeResp.Body.Close()
+			}
+
+			// Gather query params from hidden input fields
+			queryParams := url.Values{}
+			for _, match := range inputFieldPattern1.FindAllStringSubmatch(bodyStr, -1) {
+				if len(match) > 2 && match[1] != "" {
+					queryParams.Set(match[1], match[2])
+				}
+			}
+			for _, match := range inputFieldPattern2.FindAllStringSubmatch(bodyStr, -1) {
+				if len(match) > 2 && match[2] != "" && queryParams.Get(match[2]) == "" {
+					queryParams.Set(match[2], match[1])
+				}
+			}
+
+			if queryParams.Get("id") == "" {
+				queryParams.Set("id", fileID)
+			}
+			if queryParams.Get("export") == "" {
+				queryParams.Set("export", "download")
+			}
+			if queryParams.Get("confirm") == "" {
+				queryParams.Set("confirm", "t")
+			}
+
+			logger.Infof("Download", "File %s: Bypassing Google virus/size warning form", fileID)
+
+			nextURL := fmt.Sprintf("%s?%s", formAction, queryParams.Encode())
+
+			nextReq, err := http.NewRequestWithContext(ctx, "GET", nextURL, nil)
+			if err != nil {
+				return "", 0, err
+			}
+			nextReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+			if currentCookie != "" {
+				nextReq.Header.Set("Cookie", currentCookie)
+			}
+
+			finalResp, err = d.client.Do(nextReq)
+			if err != nil {
+				if ctx.Err() == nil && !strings.Contains(err.Error(), "context canceled") {
+					logger.Errorf("Download", "Second-stage download error for %s: %v", fileID, err)
+				}
+				return "", 0, err
+			}
+
+			if strings.Contains(finalResp.Header.Get("Content-Type"), "text/html") {
+				finalBytes, _ := io.ReadAll(io.LimitReader(finalResp.Body, 1024*64))
+				finalResp.Body.Close()
+				content := string(finalBytes)
+				if strings.Contains(content, "Quota exceeded") || strings.Contains(content, "Too many users have viewed or downloaded") {
+					if notifier != nil && currentCookieID != "" {
+						notifier(currentCookieID)
+					}
+					if provider != nil {
+						if nextCookie, nextID, ok := provider(currentCookieID); ok {
+							logger.Warnf("Download", "File %s: Quota exceeded on account '%s'. Auto-switching to account '%s' and restarting clean download...", fileID, currentCookieID, nextID)
+							currentCookie = nextCookie
+							currentCookieID = nextID
+							continue
+						}
+					}
+					errMsg := "Google Drive quota exceeded for this file (all available accounts in Cookie Pool exhausted / 24h cooldown)"
+					logger.Errorf("Download", "File %s: %s", fileID, errMsg)
+					return "", 0, errors.New(errMsg)
+				}
+				errMsg := "Google Drive returned HTML instead of file (file may require private access or login)"
+				logger.Errorf("Download", "File %s: %s", fileID, errMsg)
+				return "", 0, errors.New(errMsg)
 			}
 		}
-	}
+		defer finalResp.Body.Close()
 
-	if out == nil {
-		var err error
-		out, err = os.Create(destPath)
+		var filename string
+		var destPath string
+
+		if len(desiredFilename) > 0 && desiredFilename[0] != "" {
+			filename = sanitizeFilename(desiredFilename[0])
+			destPath = filepath.Join(targetFolder, filename)
+		} else {
+			// Extract filename from header or HTML fallback
+			filename = extractFilename(finalResp.Header.Get("Content-Disposition"))
+			if filename == "" && fallbackHTMLFilename != "" {
+				filename = fallbackHTMLFilename
+			}
+			if filename == "" {
+				filename = fmt.Sprintf("gdrive_%s.bin", fileID)
+			}
+			filename = sanitizeFilename(filename)
+			destPath = uniqueFilePath(filepath.Join(targetFolder, filename))
+			filename = filepath.Base(destPath)
+		}
+
+		totalSize := finalResp.ContentLength
+		if totalSize < 0 {
+			totalSize = 0
+		}
+
+		var out *os.File
+		var startOffset int64 = 0
+
+		// Check if destination file exists on disk and is partially downloaded
+		if fi, statErr := os.Stat(destPath); statErr == nil && fi.Size() > 0 && totalSize > 0 && fi.Size() < totalSize {
+			// Attempt HTTP Range resume
+			reqURL := finalResp.Request.URL.String()
+			rangeReq, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+			if err == nil {
+				rangeReq.Header.Set("Range", fmt.Sprintf("bytes=%d-", fi.Size()))
+				rangeReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+				if currentCookie != "" {
+					rangeReq.Header.Set("Cookie", currentCookie)
+				}
+				rangeResp, err := d.client.Do(rangeReq)
+				if err == nil && rangeResp.StatusCode == http.StatusPartialContent {
+					finalResp.Body.Close()
+					finalResp = rangeResp
+					out, err = os.OpenFile(destPath, os.O_WRONLY|os.O_APPEND, 0644)
+					if err == nil {
+						startOffset = fi.Size()
+						logger.Infof("Download", "Resuming '%s' from byte %d / %d", filename, startOffset, totalSize)
+					}
+				} else if rangeResp != nil {
+					rangeResp.Body.Close()
+				}
+			}
+		}
+
+		if out == nil {
+			var err error
+			out, err = os.Create(destPath)
+			if err != nil {
+				return "", 0, fmt.Errorf("failed to create destination file: %w", err)
+			}
+		}
+		defer out.Close()
+
+		logger.Infof("Download", "Receiving '%s' (Length: %d bytes, Starting: %d bytes)", filename, totalSize, startOffset)
+
+		pr := &progressReader{
+			ctx:            ctx,
+			reader:         finalResp.Body,
+			totalBytes:     totalSize,
+			downloaded:     startOffset,
+			lastDownloaded: startOffset,
+			lastReport:     time.Now(),
+			onProgress:     onProgress,
+		}
+
+		// Use 1MB buffer instead of default 32KB to eliminate syscall overhead for high-speed Wi-Fi/Gigabit connections
+		buf := make([]byte, 1024*1024)
+		copied, err := io.CopyBuffer(out, pr, buf)
 		if err != nil {
-			return "", 0, fmt.Errorf("failed to create destination file: %w", err)
+			out.Close()
+			_ = os.Remove(destPath)
+			if ctx.Err() == nil && !strings.Contains(err.Error(), "context canceled") {
+				logger.Errorf("Download", "Interrupted/failed downloading '%s': %v", filename, err)
+			}
+			return filename, copied, err
 		}
-	}
-	defer out.Close()
 
-	logger.Infof("Download", "Receiving '%s' (Length: %d bytes, Starting: %d bytes)", filename, totalSize, startOffset)
-
-	pr := &progressReader{
-		ctx:            ctx,
-		reader:         finalResp.Body,
-		totalBytes:     totalSize,
-		downloaded:     startOffset,
-		lastDownloaded: startOffset,
-		lastReport:     time.Now(),
-		onProgress:     onProgress,
-	}
-
-	// Use 1MB buffer instead of default 32KB to eliminate syscall overhead for high-speed Wi-Fi/Gigabit connections
-	buf := make([]byte, 1024*1024)
-	copied, err := io.CopyBuffer(out, pr, buf)
-	if err != nil {
 		out.Close()
-		_ = os.Remove(destPath)
-		if ctx.Err() == nil && !strings.Contains(err.Error(), "context canceled") {
-			logger.Errorf("Download", "Interrupted/failed downloading '%s': %v", filename, err)
+
+		// Verify File Integrity (Check for corruption / truncated file)
+		if integrityErr := VerifyFileIntegrity(destPath, totalSize); integrityErr != nil {
+			logger.Errorf("Integrity", "Integrity failure on '%s': %v", filename, integrityErr)
+			return filename, copied, fmt.Errorf("CORRUPT: %w", integrityErr)
 		}
-		return filename, copied, err
+
+		logger.Successf("Download", "Saved '%s' successfully (%d bytes)", filename, copied)
+
+		if onProgress != nil {
+			onProgress(copied, copied, 0, 0, 100.0)
+		}
+
+		return filename, copied, nil
 	}
 
-	out.Close()
-
-	// Verify File Integrity (Check for corruption / truncated file)
-	if integrityErr := VerifyFileIntegrity(destPath, totalSize); integrityErr != nil {
-		logger.Errorf("Integrity", "Integrity failure on '%s': %v", filename, integrityErr)
-		return filename, copied, fmt.Errorf("CORRUPT: %w", integrityErr)
-	}
-
-	logger.Successf("Download", "Saved '%s' successfully (%d bytes)", filename, copied)
-
-	if onProgress != nil {
-		onProgress(copied, copied, 0, 0, 100.0)
-	}
-
-	return filename, copied, nil
+	return "", 0, errors.New("Google Drive download attempts exceeded limit")
 }
 
 func extractFilename(disposition string) string {

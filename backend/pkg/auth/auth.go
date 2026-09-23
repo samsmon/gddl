@@ -9,18 +9,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
+type CookieEntry struct {
+	ID             string     `json:"id"`
+	Label          string     `json:"label"`
+	Cookie         string     `json:"cookie"`
+	ExhaustedUntil *time.Time `json:"exhausted_until,omitempty"`
+}
+
 type Config struct {
-	AuthEnabled    bool   `json:"auth_enabled"`
-	Username       string `json:"username"`
-	PasswordHash   string `json:"password_hash"`
-	Salt           string `json:"salt"`
-	DownloadFolder string `json:"download_folder"`
-	MaxConcurrency int    `json:"max_concurrency"`
-	GoogleCookie   string `json:"google_cookie"`
+	AuthEnabled    bool          `json:"auth_enabled"`
+	Username       string        `json:"username"`
+	PasswordHash   string        `json:"password_hash"`
+	Salt           string        `json:"salt"`
+	DownloadFolder string        `json:"download_folder"`
+	MaxConcurrency int           `json:"max_concurrency"`
+	GoogleCookie   string        `json:"google_cookie"`
+	GoogleCookies  []CookieEntry `json:"google_cookies,omitempty"`
 }
 
 type SessionInfo struct {
@@ -67,6 +76,15 @@ func (m *Manager) loadOrInit(defaultFolder string, defaultConcurrency int) error
 			}
 			if m.config.MaxConcurrency <= 0 {
 				m.config.MaxConcurrency = defaultConcurrency
+			}
+			if len(m.config.GoogleCookies) == 0 && m.config.GoogleCookie != "" {
+				m.config.GoogleCookies = []CookieEntry{
+					{
+						ID:     "primary",
+						Label:  "Primary Account",
+						Cookie: m.config.GoogleCookie,
+					},
+				}
 			}
 			return nil
 		}
@@ -124,6 +142,17 @@ func (m *Manager) UpdateConfig(folder string, concurrency int, googleCookie stri
 	}
 	if googleCookie != "" {
 		m.config.GoogleCookie = googleCookie
+		if len(m.config.GoogleCookies) == 0 {
+			m.config.GoogleCookies = []CookieEntry{
+				{
+					ID:     "primary",
+					Label:  "Primary Account",
+					Cookie: googleCookie,
+				},
+			}
+		} else {
+			m.config.GoogleCookies[0].Cookie = googleCookie
+		}
 	}
 
 	return m.saveLocked()
@@ -133,7 +162,131 @@ func (m *Manager) SetGoogleCookie(cookie string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.config.GoogleCookie = cookie
+	if cookie != "" {
+		if len(m.config.GoogleCookies) == 0 {
+			m.config.GoogleCookies = []CookieEntry{
+				{
+					ID:     "primary",
+					Label:  "Primary Account",
+					Cookie: cookie,
+				},
+			}
+		} else {
+			m.config.GoogleCookies[0].Cookie = cookie
+		}
+	} else {
+		m.config.GoogleCookies = nil
+	}
 	return m.saveLocked()
+}
+
+func (m *Manager) GetCookies() []CookieEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	res := make([]CookieEntry, len(m.config.GoogleCookies))
+	copy(res, m.config.GoogleCookies)
+	return res
+}
+
+func (m *Manager) AddCookie(label, cookie string) (CookieEntry, error) {
+	cookie = strings.TrimSpace(cookie)
+	if cookie == "" {
+		return CookieEntry{}, fmt.Errorf("cookie cannot be empty")
+	}
+	label = strings.TrimSpace(label)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if label == "" {
+		label = fmt.Sprintf("Account %d", len(m.config.GoogleCookies)+1)
+	}
+
+	id := fmt.Sprintf("cookie_%d", time.Now().UnixNano())
+	entry := CookieEntry{
+		ID:     id,
+		Label:  label,
+		Cookie: cookie,
+	}
+	m.config.GoogleCookies = append(m.config.GoogleCookies, entry)
+	if m.config.GoogleCookie == "" {
+		m.config.GoogleCookie = cookie
+	}
+	_ = m.saveLocked()
+	return entry, nil
+}
+
+func (m *Manager) RemoveCookie(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	idx := -1
+	for i, c := range m.config.GoogleCookies {
+		if c.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Errorf("cookie not found")
+	}
+
+	m.config.GoogleCookies = append(m.config.GoogleCookies[:idx], m.config.GoogleCookies[idx+1:]...)
+	if len(m.config.GoogleCookies) > 0 {
+		m.config.GoogleCookie = m.config.GoogleCookies[0].Cookie
+	} else {
+		m.config.GoogleCookie = ""
+	}
+	return m.saveLocked()
+}
+
+func (m *Manager) ResetCookieCooldown(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for i := range m.config.GoogleCookies {
+		if m.config.GoogleCookies[i].ID == id {
+			m.config.GoogleCookies[i].ExhaustedUntil = nil
+			return m.saveLocked()
+		}
+	}
+	return fmt.Errorf("cookie not found")
+}
+
+func (m *Manager) MarkCookieExhausted(idOrCookie string, duration time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	until := time.Now().Add(duration)
+	for i := range m.config.GoogleCookies {
+		if m.config.GoogleCookies[i].ID == idOrCookie || m.config.GoogleCookies[i].Cookie == idOrCookie {
+			m.config.GoogleCookies[i].ExhaustedUntil = &until
+			return m.saveLocked()
+		}
+	}
+	return nil
+}
+
+func (m *Manager) GetNextActiveCookie(excludeID ...string) (CookieEntry, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	for i := range m.config.GoogleCookies {
+		c := &m.config.GoogleCookies[i]
+		if len(excludeID) > 0 && (c.ID == excludeID[0] || c.Cookie == excludeID[0]) {
+			continue
+		}
+		if c.ExhaustedUntil != nil {
+			if now.After(*c.ExhaustedUntil) {
+				c.ExhaustedUntil = nil
+			} else {
+				continue
+			}
+		}
+		return *c, true
+	}
+	return CookieEntry{}, false
 }
 
 func (m *Manager) IsAuthEnabled() bool {

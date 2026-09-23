@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"gdrive-downloader/pkg/auth"
 	"gdrive-downloader/pkg/gdrive"
@@ -71,11 +72,26 @@ type AuthToggleRequest struct {
 }
 
 func NewServer(manager *queue.Manager, authMgr *auth.Manager, distPath string) *Server {
-	return &Server{
+	s := &Server{
 		manager:  manager,
 		authMgr:  authMgr,
 		distPath: distPath,
 	}
+
+	// Link cookie pool from authMgr to downloader with auto-failover and 24h lockout
+	manager.Downloader().SetCookieProvider(
+		func(excludeID ...string) (string, string, bool) {
+			if entry, ok := authMgr.GetNextActiveCookie(excludeID...); ok {
+				return entry.Cookie, entry.ID, true
+			}
+			return "", "", false
+		},
+		func(cookieID string) {
+			_ = authMgr.MarkCookieExhausted(cookieID, 24*time.Hour)
+		},
+	)
+
+	return s
 }
 
 func (s *Server) Routes() http.Handler {
@@ -110,6 +126,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/config", s.handleSaveConfig)
 	mux.HandleFunc("POST /api/gdrive/cookie", s.handleSetGoogleCookie)
 	mux.HandleFunc("POST /api/gdrive/logout", s.handleClearGoogleCookie)
+	mux.HandleFunc("GET /api/gdrive/cookies", s.handleGetGoogleCookies)
+	mux.HandleFunc("POST /api/gdrive/cookies", s.handleAddGoogleCookie)
+	mux.HandleFunc("DELETE /api/gdrive/cookies/{id}", s.handleDeleteGoogleCookie)
+	mux.HandleFunc("POST /api/gdrive/cookies/{id}/reset", s.handleResetGoogleCookie)
 	mux.HandleFunc("GET /api/fs/browse", s.handleBrowseFS)
 	mux.HandleFunc("POST /api/fs/mkdir", s.handleCreateFolder)
 
@@ -657,6 +677,90 @@ func (s *Server) handleClearGoogleCookie(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "cleared"})
+}
+
+type CookieResponseItem struct {
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	MaskedCookie string `json:"masked_cookie"`
+	IsExhausted  bool   `json:"is_exhausted"`
+	CooldownLeft string `json:"cooldown_left,omitempty"`
+}
+
+func (s *Server) handleGetGoogleCookies(w http.ResponseWriter, r *http.Request) {
+	cookies := s.authMgr.GetCookies()
+	now := time.Now()
+	res := make([]CookieResponseItem, len(cookies))
+	for i, c := range cookies {
+		masked := "configured"
+		if len(c.Cookie) > 16 {
+			masked = c.Cookie[:8] + "..." + c.Cookie[len(c.Cookie)-6:]
+		}
+		isEx := false
+		cooldown := ""
+		if c.ExhaustedUntil != nil && now.Before(*c.ExhaustedUntil) {
+			isEx = true
+			rem := c.ExhaustedUntil.Sub(now)
+			hrs := int(rem.Hours())
+			mins := int(rem.Minutes()) % 60
+			cooldown = fmt.Sprintf("%dh %dm", hrs, mins)
+		}
+		res[i] = CookieResponseItem{
+			ID:           c.ID,
+			Label:        c.Label,
+			MaskedCookie: masked,
+			IsExhausted:  isEx,
+			CooldownLeft: cooldown,
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
+func (s *Server) handleAddGoogleCookie(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Label  string `json:"label"`
+		Cookie string `json:"cookie"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+		return
+	}
+	entry, err := s.authMgr.AddCookie(req.Label, req.Cookie)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entry)
+}
+
+func (s *Server) handleDeleteGoogleCookie(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, `{"error":"id required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := s.authMgr.RemoveCookie(id); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (s *Server) handleResetGoogleCookie(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, `{"error":"id required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := s.authMgr.ResetCookieCooldown(id); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
