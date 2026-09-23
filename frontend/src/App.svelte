@@ -641,6 +641,165 @@
     }
   }
 
+  // Google Drive OAuth 2.0 & Auto-Bypass state
+  let accountModalTab = $state('oauth'); // 'oauth' or 'cookies'
+  let oauthConfigured = $state(false);
+  let oauthConnected = $state(false);
+  let oauthClientID = $state('');
+  let oauthClientSecret = $state('');
+  let oauthEmail = $state('');
+  let oauthAutoBypass = $state(true);
+  let oauthManualCode = $state('');
+  let isSavingOAuthConfig = $state(false);
+  let isSubmittingManualCode = $state(false);
+  let isCleaningTempFolder = $state(false);
+  let oauthMessage = $state('');
+  let oauthError = $state('');
+  let oauthAuthURL = $state('');
+  let showClientSecret = $state(false);
+
+  async function fetchOAuthStatus() {
+    try {
+      const res = await fetch('/api/gdrive/oauth/status');
+      if (res.ok) {
+        const data = await res.json();
+        oauthConfigured = !!data.configured;
+        oauthConnected = !!data.connected;
+        if (data.client_id && !oauthClientID) {
+          oauthClientID = data.client_id;
+        }
+        oauthEmail = data.email || '';
+        oauthAutoBypass = data.auto_bypass ?? true;
+      }
+    } catch (e) {
+      console.warn('Failed to fetch OAuth status', e);
+    }
+  }
+
+  async function saveOAuthConfig() {
+    oauthError = '';
+    oauthMessage = '';
+    isSavingOAuthConfig = true;
+    try {
+      const res = await fetch('/api/gdrive/oauth/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: oauthClientID.trim(),
+          client_secret: oauthClientSecret.trim(),
+          auto_bypass: oauthAutoBypass
+        })
+      });
+      if (res.ok) {
+        oauthMessage = 'Google OAuth credentials saved successfully!';
+        oauthConfigured = !!oauthClientID.trim();
+        setTimeout(() => { oauthMessage = ''; }, 4000);
+      } else {
+        const err = await res.json().catch(() => ({ error: 'Failed to save OAuth credentials' }));
+        oauthError = err.error || 'Failed to save OAuth credentials';
+      }
+    } catch (e) {
+      oauthError = 'Network error saving credentials: ' + e.message;
+    } finally {
+      isSavingOAuthConfig = false;
+    }
+  }
+
+  async function startGoogleOAuth() {
+    oauthError = '';
+    oauthMessage = '';
+    try {
+      if (oauthClientID.trim() || oauthClientSecret.trim()) {
+        await saveOAuthConfig();
+      }
+
+      const res = await fetch('/api/gdrive/oauth/auth-url');
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Failed to generate authorization URL' }));
+        throw new Error(err.error || 'Failed to generate authorization URL');
+      }
+      const data = await res.json();
+      oauthAuthURL = data.auth_url;
+
+      const width = 600;
+      const height = 700;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+      window.open(
+        data.auth_url,
+        'GoogleDriveAuth',
+        `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no`
+      );
+
+      oauthMessage = 'Authorization window opened. Sign in and grant Google Drive permissions.';
+    } catch (e) {
+      oauthError = e.message;
+    }
+  }
+
+  async function submitManualCode() {
+    if (!oauthManualCode.trim()) return;
+    oauthError = '';
+    oauthMessage = '';
+    isSubmittingManualCode = true;
+    try {
+      const res = await fetch('/api/gdrive/oauth/manual-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: oauthManualCode.trim() })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        oauthConnected = true;
+        oauthEmail = data.email || '';
+        oauthManualCode = '';
+        oauthMessage = `Connected successfully as ${data.email || 'Google User'}!`;
+        await fetchOAuthStatus();
+        setTimeout(() => { oauthMessage = ''; }, 5000);
+      } else {
+        oauthError = data.error || 'Failed to verify authorization code';
+      }
+    } catch (e) {
+      oauthError = 'Network error: ' + e.message;
+    } finally {
+      isSubmittingManualCode = false;
+    }
+  }
+
+  async function disconnectOAuth() {
+    openConfirm('Disconnect Google Account', 'Disconnect Google Drive OAuth account? Automated quota bypass will no longer be active.', async () => {
+      try {
+        await fetch('/api/gdrive/oauth/disconnect', { method: 'POST' });
+        oauthConnected = false;
+        oauthEmail = '';
+        oauthMessage = 'Google account disconnected.';
+        setTimeout(() => { oauthMessage = ''; }, 3000);
+      } catch (e) {
+        console.error('Failed to disconnect OAuth:', e);
+      }
+    }, 'Disconnect', 'danger');
+  }
+
+  async function cleanupTempFolder() {
+    isCleaningTempFolder = true;
+    oauthMessage = '';
+    oauthError = '';
+    try {
+      const res = await fetch('/api/gdrive/oauth/cleanup-temp', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        oauthMessage = `Cleaned up ${data.deleted_count || 0} temporary file(s) from ggdl_temp in your Google Drive.`;
+        setTimeout(() => { oauthMessage = ''; }, 5000);
+      } else {
+        oauthError = data.error || 'Failed to clean temp folder';
+      }
+    } catch (e) {
+      oauthError = 'Network error: ' + e.message;
+    } finally {
+      isCleaningTempFolder = false;
+    }
+  }
+
   async function checkAuthStatus() {
     try {
       const res = await fetch('/api/auth/status');
@@ -787,6 +946,7 @@
     fetchDownloads();
     fetchLogs();
     fetchGoogleCookies();
+    fetchOAuthStatus();
     setupSSE();
     if (!pollInterval) {
       pollInterval = setInterval(() => {
@@ -1578,6 +1738,15 @@
 
     checkAuthStatus();
 
+    const handleOAuthMessage = (event) => {
+      if (event.data && event.data.type === 'gdrive-oauth-success') {
+        fetchOAuthStatus();
+        oauthMessage = `Google Account ${event.data.email || ''} connected successfully!`;
+        setTimeout(() => { oauthMessage = ''; }, 5000);
+      }
+    };
+    window.addEventListener('message', handleOAuthMessage);
+
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('click', closeContextMenu);
     window.addEventListener('click', closeMenus);
@@ -1942,14 +2111,15 @@
 
       <div class="tb-separator"></div>
 
-      <!-- Google Cookie Session (For downloading restricted files) -->
-      <button class="tb-btn" onclick={() => showLoginModal = true} title="Google Account Session Cookie (for restricted GDrive files)">
+      <!-- Google Account & OAuth Quota Bypass -->
+      <button class="tb-btn" onclick={() => showLoginModal = true} title="Google Account, OAuth 2.0 & Auto-Bypass Settings">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-          <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+          <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"></path>
+          <path d="M12 12v9"></path>
+          <path d="m8 17 4 4 4-4"></path>
         </svg>
-        <span>{hasLogin ? 'Google Active' : 'Google Cookie'}</span>
-        {#if hasLogin}
+        <span>{oauthConnected ? 'OAuth Active' : (hasLogin ? 'Google Cookie' : 'Google Account')}</span>
+        {#if oauthConnected || hasLogin}
           <span class="auth-dot"></span>
         {/if}
       </button>
@@ -3215,12 +3385,12 @@
     </div>
   {/if}
 
-  <!-- Modal: Google Account Cookie Pool & Rotation Manager -->
+  <!-- Modal: Google Account Manager (OAuth 2.0 & Cookie Pool) -->
   {#if showLoginModal}
     <div class="modal-overlay" role="presentation" onclick={() => showLoginModal = false} onkeydown={(e) => e.key === 'Escape' && (showLoginModal = false)}>
-      <div class="modal-window" role="dialog" aria-modal="true" tabindex="-1" style="max-width: 580px;" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+      <div class="modal-window" role="dialog" aria-modal="true" tabindex="-1" style="max-width: 620px;" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
         <div class="modal-header">
-          <span>Google Account Cookie Pool (Auto-Failover)</span>
+          <span>Google Drive Integration & Auto-Bypass</span>
           <button class="modal-close" aria-label="Close" onclick={() => showLoginModal = false}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -3230,143 +3400,272 @@
         </div>
 
         <div class="modal-body">
-          <div class="auth-status-banner" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <span class="status-indicator" class:active-dot={cookieList.length > 0} class:failed-dot={cookieList.length === 0}></span>
-              <span>Pool Status: <strong>{cookieList.length > 0 ? `${cookieList.filter(c => !c.is_exhausted).length} of ${cookieList.length} Accounts Ready` : 'No accounts configured (using anonymous public IP quota)'}</strong></span>
-            </div>
-            {#if cookieList.some(c => c.is_exhausted)}
-              <button class="btn-mini btn-action" onclick={resetAllCookieCooldowns} title="Reset all exhausted accounts back to active">
-                Reset All Cooldowns
-              </button>
-            {/if}
+          <!-- Navigation Tabs -->
+          <div style="display: flex; gap: 8px; border-bottom: 1px solid var(--border-color); margin-bottom: 14px; padding-bottom: 4px;">
+            <button
+              class="btn-subtle"
+              style="padding: 6px 14px; font-size: 12px; font-weight: 600; border-radius: 4px; display: flex; align-items: center; gap: 6px; {accountModalTab === 'oauth' ? 'background: var(--accent-blue); color: white;' : 'background: transparent; color: var(--text-muted);'}"
+              onclick={() => accountModalTab = 'oauth'}
+            >
+              <span>Google OAuth 2.0 (Auto-Bypass)</span>
+              <span style="font-size: 9px; padding: 1px 5px; border-radius: 3px; {accountModalTab === 'oauth' ? 'background: rgba(255,255,255,0.25); color: white;' : 'background: rgba(46,160,67,0.2); color: var(--accent-green);'}">Recommended</span>
+            </button>
+            <button
+              class="btn-subtle"
+              style="padding: 6px 14px; font-size: 12px; font-weight: 600; border-radius: 4px; display: flex; align-items: center; gap: 6px; {accountModalTab === 'cookies' ? 'background: var(--accent-blue); color: white;' : 'background: transparent; color: var(--text-muted);'}"
+              onclick={() => accountModalTab = 'cookies'}
+            >
+              <span>Cookie Pool (Legacy)</span>
+              {#if cookieList.length > 0}
+                <span style="font-size: 9px; padding: 1px 5px; border-radius: 3px; background: rgba(255,255,255,0.2); color: white;">{cookieList.length}</span>
+              {/if}
+            </button>
           </div>
 
-          <span class="form-hint" style="margin-top: 0.5rem; margin-bottom: 0.75rem;">
-            Add multiple Google accounts to bypass Google's daily "Download quota exceeded" limit. If an account is locked out by Google, GDDL automatically switches to the next account and restarts cleanly.
-          </span>
-
-          {#if cookieError}
-            <div style="color: var(--accent-red); font-size: 11px; background: rgba(248,81,73,0.1); padding: 5px 8px; border-radius: 4px; margin-bottom: 8px;">{cookieError}</div>
-          {/if}
-          {#if cookieMessage}
-            <div style="color: var(--accent-green); font-size: 11px; background: rgba(46,160,67,0.1); padding: 5px 8px; border-radius: 4px; margin-bottom: 8px;">{cookieMessage}</div>
-          {/if}
-
-          <!-- Existing Accounts List -->
-          {#if cookieList.length > 0}
-            <div class="cookie-pool-container" style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; max-height: 200px; overflow-y: auto;">
-              {#each cookieList as c}
-                <div style="background: var(--table-row-alt); border: 1px solid var(--border-subtle); padding: 8px 10px; border-radius: 5px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-                  <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
-                    <div style="display: flex; align-items: center; gap: 6px;">
-                      <span style="font-weight: 600; font-size: 12px; color: var(--text-main);">{c.label}</span>
-                      {#if c.is_exhausted}
-                        <span class="concurrency-badge badge-aggressive" style="font-size: 9px; padding: 1px 5px;">Cooldown ({c.cooldown_left})</span>
-                      {:else}
-                        <span class="concurrency-badge badge-safe" style="font-size: 9px; padding: 1px 5px;">Active</span>
-                      {/if}
-                    </div>
-                    <span style="font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">{c.masked_cookie}</span>
-                  </div>
-
-                  <div style="display: flex; gap: 5px; flex-shrink: 0;">
-                    {#if c.is_exhausted}
-                      <button class="btn btn-secondary" onclick={() => resetCookieCooldown(c.id)} style="font-size: 10px; padding: 2px 7px;">
-                        Reset
-                      </button>
-                    {/if}
-                    <button class="btn btn-secondary" onclick={() => removeCookie(c.id)} style="font-size: 10px; padding: 2px 7px; color: var(--accent-red);">
-                      Remove
-                    </button>
-                  </div>
+          <!-- TAB 1: GOOGLE OAUTH 2.0 -->
+          {#if accountModalTab === 'oauth'}
+            <!-- Status Banner -->
+            <div class="auth-status-banner" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px;">
+              <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+                <span class="status-indicator" class:active-dot={oauthConnected} class:failed-dot={!oauthConnected}></span>
+                <span style="text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">
+                  Status: <strong>{oauthConnected ? `Connected (${oauthEmail || 'Ready'})` : 'Not Connected'}</strong>
+                </span>
+              </div>
+              {#if oauthConnected}
+                <div style="display: flex; gap: 6px; flex-shrink: 0;">
+                  <button class="btn-mini btn-action" disabled={isCleaningTempFolder} onclick={cleanupTempFolder} title="Purge all temporary files from ggdl_temp in your Google Drive">
+                    {isCleaningTempFolder ? 'Cleaning...' : 'Clean ggdl_temp'}
+                  </button>
+                  <button class="btn-mini btn-action" onclick={disconnectOAuth} style="color: var(--accent-red);" title="Disconnect Google Account">
+                    Disconnect
+                  </button>
                 </div>
-              {/each}
-            </div>
-          {/if}
-
-          <!-- Add Account Form -->
-          <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 10px;">
-            <div style="display: flex; align-items: center; justify-content: space-between;">
-              <span style="font-weight: 600; font-size: 12px; color: var(--accent-blue);">+ Add Google Account Cookie</span>
-              <span style="font-size: 10px; color: var(--text-dim); background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 3px;">Auto-extracts from cURL</span>
+              {/if}
             </div>
 
-            <!-- Quick Guide: 1-Click Copy without manual search -->
-            <div style="background: rgba(88, 166, 255, 0.08); border: 1px solid rgba(88, 166, 255, 0.22); border-radius: 6px; padding: 8px 10px; font-size: 11px;">
-              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-                <span style="font-weight: 600; color: var(--accent-blue);">Cara Tercepat Tanpa Cari Manual (Copy as cURL):</span>
-                <span style="font-size: 10px; color: var(--accent-green); font-weight: 600;">1-Klik Saja</span>
+            {#if oauthMessage}
+              <div style="color: var(--accent-green); font-size: 11px; background: rgba(46,160,67,0.12); border: 1px solid rgba(46,160,67,0.3); padding: 7px 10px; border-radius: 5px; margin-bottom: 10px;">
+                {oauthMessage}
               </div>
-              <ol style="margin: 0; padding-left: 18px; color: var(--text-muted); line-height: 1.5; font-size: 10.5px;">
-                <li>Buka <code style="color: var(--accent-blue);">drive.google.com</code> di browser &amp; tekan <strong>F12</strong> (DevTools).</li>
-                <li>Di tab <strong>Network</strong>, klik kanan pada request paling atas &gt; <strong>Copy</strong> &gt; pilih <strong>Copy as cURL (bash)</strong>.</li>
-                <li><strong>Langsung tempel (Ctrl+V)</strong> di kotak di bawah. GDDL otomatis menyaring &amp; mengekstrak <code>SID</code>, <code>HSID</code>, <code>SSID</code> seketika!</li>
-              </ol>
-              <div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(255, 255, 255, 0.1); font-size: 10px; color: var(--text-dim); line-height: 1.4;">
-                <strong style="color: #e3b341;">Kenapa tidak via Console?</strong> Cookie <code>SID</code>, <code>HSID</code>, dan <code>SSID</code> berstatus <em>HttpOnly</em>, sehingga oleh standar keamanan browser otomatis disembunyikan dari JavaScript Console (<code>document.cookie</code>) demi mencegah XSS. Metode <em>Copy as cURL</em> di atas adalah cara resmi yang 100% lengkap dan instan.
-              </div>
-            </div>
-
-            {#if wasCookieExtracted}
-              <div style="font-size: 11px; color: var(--accent-green); background: rgba(46,160,67,0.15); border: 1px solid rgba(46,160,67,0.3); border-radius: 4px; padding: 5px 8px; display: flex; align-items: center; gap: 6px;">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                  <polyline points="20 6 9 17 4 12"></polyline>
-                </svg>
-                <span>Berhasil mengekstrak cookie dari cURL / Request Headers!</span>
+            {/if}
+            {#if oauthError}
+              <div style="color: var(--accent-red); font-size: 11px; background: rgba(248,81,73,0.12); border: 1px solid rgba(248,81,73,0.3); padding: 7px 10px; border-radius: 5px; margin-bottom: 10px;">
+                {oauthError}
               </div>
             {/if}
 
-            <div style="display: grid; grid-template-columns: 110px 1fr; gap: 8px; align-items: flex-start;">
-              <span style="font-size: 11px; color: var(--text-muted); padding-top: 5px;">Account Label:</span>
-              <input type="text" bind:value={newCookieLabel} placeholder="e.g. Gmail Utama, Gmail 2..." style="padding: 4px 8px; font-size: 12px;" />
+            <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px;">
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span style="font-weight: 600; font-size: 12px; color: var(--accent-blue);">Google Cloud OAuth 2.0 Credentials</span>
+                <span style="font-size: 10px; color: var(--text-dim); background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 3px;">Full Drive Access</span>
+              </div>
 
-              <span style="font-size: 11px; color: var(--text-muted); padding-top: 5px;">Cookie String:</span>
-              <div style="display: flex; flex-direction: column; gap: 6px;">
-                <textarea
-                  bind:value={newCookieValue}
-                  oninput={(e) => handleCookieInput(e.target.value)}
-                  onpaste={(e) => setTimeout(() => handleCookieInput(newCookieValue), 15)}
-                  rows="3"
-                  placeholder="Tempel string Cookie atau langsung paste cURL dari DevTools (F12 > Network > Klik kanan > Copy as cURL)"
-                  style="padding: 6px 8px; font-size: 11px; font-family: var(--font-mono); resize: vertical; width: 100%; box-sizing: border-box;"
-                ></textarea>
+              <div style="display: grid; grid-template-columns: 95px 1fr; gap: 8px; align-items: center;">
+                <span style="font-size: 11px; color: var(--text-muted);">Client ID:</span>
+                <input
+                  type="text"
+                  bind:value={oauthClientID}
+                  placeholder="e.g. 123456789-abc.apps.googleusercontent.com"
+                  style="padding: 5px 8px; font-size: 11px; font-family: var(--font-mono);"
+                />
 
-                {#if cookieValidation}
-                  <div style="padding: 6px 8px; border-radius: 4px; font-size: 11px; background: {cookieValidation.valid ? 'rgba(46,160,67,0.12)' : 'rgba(210,153,34,0.14)'}; border: 1px solid {cookieValidation.valid ? 'rgba(46,160,67,0.3)' : 'rgba(210,153,34,0.35)'};">
-                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; flex-wrap: wrap; gap: 4px;">
-                      <span style="font-weight: 600; color: {cookieValidation.valid ? 'var(--accent-green)' : '#e3b341'};">
-                        {cookieValidation.valid ? 'All 3 Core Authentication Cookies Detected' : `Incomplete Cookie (${cookieValidation.count}/3 Core Keys Detected)`}
-                      </span>
-                      <span style="font-family: var(--font-mono); font-size: 10px;">
-                        <span style="color: {cookieValidation.hasSID ? 'var(--accent-green)' : 'var(--text-dim)'}; font-weight: {cookieValidation.hasSID ? 'bold' : 'normal'};">SID {cookieValidation.hasSID ? 'OK' : 'MISSING'}</span> |
-                        <span style="color: {cookieValidation.hasHSID ? 'var(--accent-green)' : 'var(--text-dim)'}; font-weight: {cookieValidation.hasHSID ? 'bold' : 'normal'};">HSID {cookieValidation.hasHSID ? 'OK' : 'MISSING'}</span> |
-                        <span style="color: {cookieValidation.hasSSID ? 'var(--accent-green)' : 'var(--text-dim)'}; font-weight: {cookieValidation.hasSSID ? 'bold' : 'normal'};">SSID {cookieValidation.hasSSID ? 'OK' : 'MISSING'}</span>
-                      </span>
-                    </div>
-                    {#if !cookieValidation.valid}
-                      <div style="font-size: 10px; color: var(--text-muted); line-height: 1.4; margin-top: 3px;">
-                        Google Drive requires all three cookies: <strong>SID</strong>, <strong>HSID</strong>, and <strong>SSID</strong>.
-                        <br/>
-                        <strong>Trik praktis:</strong> Di DevTools (F12) &gt; tab <strong>Network</strong> &gt; klik kanan request paling atas &gt; <strong>Copy</strong> &gt; <em>Copy as cURL (bash)</em> &gt; paste langsung ke kolom ini!
-                      </div>
-                    {/if}
-                  </div>
-                {/if}
+                <span style="font-size: 11px; color: var(--text-muted);">Client Secret:</span>
+                <div style="display: flex; gap: 4px;">
+                  <input
+                    type={showClientSecret ? 'text' : 'password'}
+                    bind:value={oauthClientSecret}
+                    placeholder="e.g. GOCSPX-..."
+                    style="padding: 5px 8px; font-size: 11px; font-family: var(--font-mono); flex: 1;"
+                  />
+                  <button class="btn btn-secondary" onclick={() => showClientSecret = !showClientSecret} style="padding: 4px 8px; font-size: 10px;">
+                    {showClientSecret ? 'Hide' : 'Show'}
+                  </button>
+                </div>
+              </div>
+
+              <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-top: 4px; font-size: 11px; color: var(--text-main);">
+                <input type="checkbox" bind:checked={oauthAutoBypass} style="accent-color: var(--accent-blue);" />
+                <span>Otomatis bypass limit kuota 24 jam Google Drive (Make a copy ke <code>ggdl_temp</code> &amp; hapus otomatis)</span>
+              </label>
+
+              <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px;">
+                <button class="btn btn-secondary" disabled={isSavingOAuthConfig} onclick={saveOAuthConfig} style="font-size: 11px; padding: 5px 12px;">
+                  {isSavingOAuthConfig ? 'Saving...' : 'Save Credentials'}
+                </button>
+                <button
+                  class="btn btn-primary"
+                  disabled={!oauthClientID.trim()}
+                  onclick={startGoogleOAuth}
+                  style="font-size: 11px; padding: 5px 16px; background: {oauthConnected ? 'var(--accent-blue)' : '#10b981'};"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px;">
+                    <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
+                    <polyline points="10 17 15 12 10 7"></polyline>
+                    <line x1="15" y1="12" x2="3" y2="12"></line>
+                  </svg>
+                  {oauthConnected ? 'Re-authenticate Account' : 'Connect Google Drive'}
+                </button>
+              </div>
+
+              <!-- Quick Setup Help Accordion -->
+              <details style="font-size: 10.5px; color: var(--text-muted); border-top: 1px dashed var(--border-subtle); padding-top: 6px; margin-top: 2px;">
+                <summary style="cursor: pointer; color: var(--accent-blue); font-weight: 500;">Panduan 1 Menit: Cara Membuat Client ID &amp; Secret Gratis</summary>
+                <ol style="margin: 6px 0 0 0; padding-left: 18px; line-height: 1.5; color: var(--text-dim);">
+                  <li>Buka <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" style="color: var(--accent-blue);">Google Cloud Console</a> &gt; buat project baru jika belum ada.</li>
+                  <li>Di menu <strong>Enabled APIs &amp; Services</strong>, cari dan aktifkan <strong>Google Drive API</strong>.</li>
+                  <li>Di <strong>OAuth consent screen</strong>, pilih <em>External</em> &gt; isi nama app (misal <em>GDDL</em>) &gt; tambahkan email Anda sebagai Test User.</li>
+                  <li>Di menu <strong>Credentials</strong> &gt; <em>Create Credentials</em> &gt; pilih <strong>OAuth client ID</strong> &gt; Application type: <strong>Web application</strong>.</li>
+                  <li>Di bagian <strong>Authorized redirect URIs</strong>, tambahkan:<br/><code style="color: var(--accent-green); background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px;">http://127.0.0.1:8080/api/gdrive/oauth/callback</code></li>
+                  <li>Salin Client ID dan Client Secret ke form di atas, lalu klik <strong>Connect Google Drive</strong>.</li>
+                </ol>
+              </details>
+            </div>
+
+            <!-- Manual Callback / Rclone Style Box -->
+            <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px;">
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span style="font-weight: 600; font-size: 11px; color: var(--text-main);">Manual Authorization / Remote Host (Rclone style)</span>
+                <span style="font-size: 9.5px; color: var(--text-dim);">Fallback Input</span>
+              </div>
+              <span style="font-size: 10px; color: var(--text-muted); line-height: 1.4;">
+                Jika Google login berhasil di browser tapi jendela tidak menutup otomatis (misal berjalan di Docker/remote server), salin URL dari address bar browser setelah approve login dan tempel di bawah:
+              </span>
+              <div style="display: flex; gap: 6px;">
+                <input
+                  type="text"
+                  bind:value={oauthManualCode}
+                  placeholder="Tempel URL callback lengkap misal: http://127.0.0.1:8080/api/gdrive/oauth/callback?code=... atau kode 4/0A..."
+                  style="flex: 1; padding: 5px 8px; font-size: 11px; font-family: var(--font-mono);"
+                />
+                <button
+                  class="btn btn-secondary"
+                  disabled={!oauthManualCode.trim() || isSubmittingManualCode}
+                  onclick={submitManualCode}
+                  style="font-size: 11px; padding: 5px 12px;"
+                >
+                  {isSubmittingManualCode ? 'Verifying...' : 'Submit Code'}
+                </button>
               </div>
             </div>
 
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
-              <span style="font-size: 10px; color: var(--text-dim);">Dukungan format: cURL (bash/cmd), raw headers, JSON (Cookie-Editor), atau string cookie murni</span>
-              <button class="btn btn-primary" disabled={!newCookieValue.trim() || isAddingCookie} onclick={addCookieToPool} style="font-size: 11px; padding: 4px 12px;">
-                {isAddingCookie ? 'Adding...' : 'Add Account to Pool'}
-              </button>
+          <!-- TAB 2: COOKIE POOL (LEGACY) -->
+          {:else if accountModalTab === 'cookies'}
+            <div class="auth-status-banner" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span class="status-indicator" class:active-dot={cookieList.length > 0} class:failed-dot={cookieList.length === 0}></span>
+                <span>Pool Status: <strong>{cookieList.length > 0 ? `${cookieList.filter(c => !c.is_exhausted).length} of ${cookieList.length} Accounts Ready` : 'No accounts configured'}</strong></span>
+              </div>
+              {#if cookieList.some(c => c.is_exhausted)}
+                <button class="btn-mini btn-action" onclick={resetAllCookieCooldowns} title="Reset all exhausted accounts back to active">
+                  Reset All Cooldowns
+                </button>
+              {/if}
             </div>
-          </div>
+
+            <span class="form-hint" style="margin-top: 0.5rem; margin-bottom: 0.75rem;">
+              Metode cookie legacy: Menambahkan cookie Google Drive secara manual. Jika sebuah akun terkena limit 24 jam, GDDL otomatis beralih ke akun berikutnya.
+            </span>
+
+            {#if cookieError}
+              <div style="color: var(--accent-red); font-size: 11px; background: rgba(248,81,73,0.1); padding: 5px 8px; border-radius: 4px; margin-bottom: 8px;">{cookieError}</div>
+            {/if}
+            {#if cookieMessage}
+              <div style="color: var(--accent-green); font-size: 11px; background: rgba(46,160,67,0.1); padding: 5px 8px; border-radius: 4px; margin-bottom: 8px;">{cookieMessage}</div>
+            {/if}
+
+            <!-- Existing Accounts List -->
+            {#if cookieList.length > 0}
+              <div class="cookie-pool-container" style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; max-height: 180px; overflow-y: auto;">
+                {#each cookieList as c}
+                  <div style="background: var(--table-row-alt); border: 1px solid var(--border-subtle); padding: 8px 10px; border-radius: 5px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                    <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
+                      <div style="display: flex; align-items: center; gap: 6px;">
+                        <span style="font-weight: 600; font-size: 12px; color: var(--text-main);">{c.label}</span>
+                        {#if c.is_exhausted}
+                          <span class="concurrency-badge badge-aggressive" style="font-size: 9px; padding: 1px 5px;">Cooldown ({c.cooldown_left})</span>
+                        {:else}
+                          <span class="concurrency-badge badge-safe" style="font-size: 9px; padding: 1px 5px;">Active</span>
+                        {/if}
+                      </div>
+                      <span style="font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">{c.masked_cookie}</span>
+                    </div>
+
+                    <div style="display: flex; gap: 5px; flex-shrink: 0;">
+                      {#if c.is_exhausted}
+                        <button class="btn btn-secondary" onclick={() => resetCookieCooldown(c.id)} style="font-size: 10px; padding: 2px 7px;">
+                          Reset
+                        </button>
+                      {/if}
+                      <button class="btn btn-secondary" onclick={() => removeCookie(c.id)} style="font-size: 10px; padding: 2px 7px; color: var(--accent-red);">
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+
+            <!-- Add Account Form -->
+            <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 10px;">
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span style="font-weight: 600; font-size: 12px; color: var(--accent-blue);">+ Add Google Account Cookie</span>
+                <span style="font-size: 10px; color: var(--text-dim); background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 3px;">Auto-extracts from cURL</span>
+              </div>
+
+              {#if wasCookieExtracted}
+                <div style="font-size: 11px; color: var(--accent-green); background: rgba(46,160,67,0.15); border: 1px solid rgba(46,160,67,0.3); border-radius: 4px; padding: 5px 8px; display: flex; align-items: center; gap: 6px;">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                  <span>Berhasil mengekstrak cookie dari cURL / Request Headers!</span>
+                </div>
+              {/if}
+
+              <div style="display: grid; grid-template-columns: 100px 1fr; gap: 8px; align-items: flex-start;">
+                <span style="font-size: 11px; color: var(--text-muted); padding-top: 5px;">Account Label:</span>
+                <input type="text" bind:value={newCookieLabel} placeholder="e.g. Gmail Utama, Gmail 2..." style="padding: 4px 8px; font-size: 12px;" />
+
+                <span style="font-size: 11px; color: var(--text-muted); padding-top: 5px;">Cookie String:</span>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                  <textarea
+                    bind:value={newCookieValue}
+                    oninput={(e) => handleCookieInput(e.target.value)}
+                    onpaste={(e) => setTimeout(() => handleCookieInput(newCookieValue), 15)}
+                    rows="3"
+                    placeholder="Tempel string Cookie atau langsung paste cURL dari DevTools (F12 > Network > Klik kanan > Copy as cURL)"
+                    style="padding: 6px 8px; font-size: 11px; font-family: var(--font-mono); resize: vertical; width: 100%; box-sizing: border-box;"
+                  ></textarea>
+
+                  {#if cookieValidation}
+                    <div style="padding: 6px 8px; border-radius: 4px; font-size: 11px; background: {cookieValidation.valid ? 'rgba(46,160,67,0.12)' : 'rgba(210,153,34,0.14)'}; border: 1px solid {cookieValidation.valid ? 'rgba(46,160,67,0.3)' : 'rgba(210,153,34,0.35)'};">
+                      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; flex-wrap: wrap; gap: 4px;">
+                        <span style="font-weight: 600; color: {cookieValidation.valid ? 'var(--accent-green)' : '#e3b341'};">
+                          {cookieValidation.valid ? 'All 3 Core Authentication Cookies Detected' : `Incomplete Cookie (${cookieValidation.count}/3 Core Keys Detected)`}
+                        </span>
+                        <span style="font-family: var(--font-mono); font-size: 10px;">
+                          <span style="color: {cookieValidation.hasSID ? 'var(--accent-green)' : 'var(--text-dim)'}; font-weight: {cookieValidation.hasSID ? 'bold' : 'normal'};">SID {cookieValidation.hasSID ? 'OK' : 'MISSING'}</span> |
+                          <span style="color: {cookieValidation.hasHSID ? 'var(--accent-green)' : 'var(--text-dim)'}; font-weight: {cookieValidation.hasHSID ? 'bold' : 'normal'};">HSID {cookieValidation.hasHSID ? 'OK' : 'MISSING'}</span> |
+                          <span style="color: {cookieValidation.hasSSID ? 'var(--accent-green)' : 'var(--text-dim)'}; font-weight: {cookieValidation.hasSSID ? 'bold' : 'normal'};">SSID {cookieValidation.hasSSID ? 'OK' : 'MISSING'}</span>
+                        </span>
+                      </div>
+                    </div>
+                  {/if}
+                </div>
+              </div>
+
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
+                <span style="font-size: 10px; color: var(--text-dim);">Dukungan format: cURL (bash/cmd), raw headers, JSON</span>
+                <button class="btn btn-primary" disabled={!newCookieValue.trim() || isAddingCookie} onclick={addCookieToPool} style="font-size: 11px; padding: 4px 12px;">
+                  {isAddingCookie ? 'Adding...' : 'Add Account to Pool'}
+                </button>
+              </div>
+            </div>
+          {/if}
         </div>
 
         <div class="modal-footer">
-          {#if cookieList.length > 0}
+          {#if accountModalTab === 'cookies' && cookieList.length > 0}
             <button class="btn btn-danger" onclick={logoutGoogle} style="margin-right: auto;">Clear All Accounts</button>
           {/if}
           <button class="btn btn-secondary" onclick={() => showLoginModal = false}>Close</button>
@@ -3492,25 +3791,30 @@
           <!-- Divider -->
           <div style="border-top: 1px solid var(--border-color); margin: 1.25rem 0 1rem 0;"></div>
 
-          <!-- Google Account Cookie Pool Section -->
+          <!-- Google Account & OAuth Quota Bypass Section -->
           <div class="form-group">
             <div style="display: flex; align-items: center; justify-content: space-between;">
-              <span class="form-title" style="font-weight: 600; color: var(--accent-blue);">Google Account Cookie Pool (Bypass Quota Limits)</span>
-              <span class="concurrency-badge {cookieList.filter(c => !c.is_exhausted).length > 0 ? 'badge-safe' : 'badge-aggressive'}">
-                {cookieList.filter(c => !c.is_exhausted).length} of {cookieList.length} Accounts Active
-              </span>
+              <span class="form-title" style="font-weight: 600; color: var(--accent-blue);">Google Drive &amp; Quota Bypass</span>
+              {#if oauthConnected}
+                <span class="concurrency-badge badge-safe">OAuth Connected</span>
+              {:else if cookieList.length > 0}
+                <span class="concurrency-badge badge-safe">{cookieList.filter(c => !c.is_exhausted).length} of {cookieList.length} Cookies Active</span>
+              {:else}
+                <span class="concurrency-badge badge-aggressive">Not Connected</span>
+              {/if}
             </div>
             <span class="form-hint" style="margin-bottom: 0.5rem;">
-              Bypass Google's daily "Download quota exceeded" lockouts with multi-account rotation and clean auto-failover.
+              Bypass Google's daily "Download quota exceeded" limit automatically using OAuth 2.0 (`ggdl_temp`) or multi-account cookie failover.
             </span>
 
             <div style="display: flex; align-items: center; gap: 8px;">
               <button class="btn btn-secondary" onclick={() => { showSettingsModal = false; showLoginModal = true; }} style="display: flex; align-items: center; gap: 6px;">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <circle cx="12" cy="12" r="10"></circle>
-                  <path d="M12 8v8M8 12h8"></path>
+                  <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"></path>
+                  <path d="M12 12v9"></path>
+                  <path d="m8 17 4 4 4-4"></path>
                 </svg>
-                <span>Manage Cookie Pool ({cookieList.length} Accounts)...</span>
+                <span>Google Account &amp; OAuth Bypass Settings...</span>
               </button>
             </div>
           </div>

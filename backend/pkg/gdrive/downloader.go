@@ -110,6 +110,7 @@ type Downloader struct {
 	googleCookie            string
 	cookieProvider          CookieProvider
 	cookieExhaustedNotifier CookieExhaustedNotifier
+	bypassManager           *BypassManager
 }
 
 func NewDownloader() (*Downloader, error) {
@@ -227,6 +228,18 @@ func (d *Downloader) GetGoogleCookie() string {
 	return d.googleCookie
 }
 
+func (d *Downloader) SetBypassManager(bm *BypassManager) {
+	d.cookieLock.Lock()
+	defer d.cookieLock.Unlock()
+	d.bypassManager = bm
+}
+
+func (d *Downloader) GetBypassManager() *BypassManager {
+	d.cookieLock.RLock()
+	defer d.cookieLock.RUnlock()
+	return d.bypassManager
+}
+
 func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder string, onProgress ProgressCallback, desiredFilename ...string) (string, int64, error) {
 	if err := os.MkdirAll(targetFolder, 0755); err != nil {
 		return "", 0, fmt.Errorf("failed to create target folder: %w", err)
@@ -332,11 +345,27 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 						continue
 					}
 				}
+				if bm := d.GetBypassManager(); bm != nil && bm.IsAvailable() && bm.IsAutoBypass() {
+					desired := ""
+					if len(desiredFilename) > 0 {
+						desired = desiredFilename[0]
+					}
+					logger.Warnf("Download", "File %s: Google Drive quota exceeded. Executing automated OAuth bypass via ggdl_temp...", fileID)
+					return bm.ExecuteBypass(ctx, fileID, targetFolder, desired, onProgress)
+				}
 				errMsg := "Google Drive download quota exceeded for this file (all available accounts in Cookie Pool exhausted / 24h cooldown)"
 				logger.Errorf("Download", "File %s: %s", fileID, errMsg)
 				return "", 0, errors.New(errMsg)
 			}
 			if strings.Contains(bodyStr, "Access denied") || strings.Contains(bodyStr, "You need access") {
+				if bm := d.GetBypassManager(); bm != nil && bm.IsAvailable() {
+					desired := ""
+					if len(desiredFilename) > 0 {
+						desired = desiredFilename[0]
+					}
+					logger.Infof("Download", "File %s: Access denied on public link. Attempting direct OAuth download with authenticated Google account...", fileID)
+					return bm.DownloadClonedFile(ctx, fileID, targetFolder, desired, onProgress)
+				}
 				errMsg := "Access denied: link requires Google login or private folder access"
 				logger.Errorf("Download", "File %s: %s", fileID, errMsg)
 				return "", 0, errors.New(errMsg)
@@ -394,6 +423,8 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 				return "", 0, err
 			}
 			nextReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+			nextReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+			nextReq.Header.Set("Referer", fmt.Sprintf("https://drive.google.com/file/d/%s/view", fileID))
 
 			if currentCookie != "" {
 				nextReq.Header.Set("Cookie", currentCookie)
@@ -411,7 +442,14 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 				finalBytes, _ := io.ReadAll(io.LimitReader(finalResp.Body, 1024*64))
 				finalResp.Body.Close()
 				content := string(finalBytes)
-				if strings.Contains(content, "Quota exceeded") || strings.Contains(content, "Too many users have viewed or downloaded") {
+				htmlSnippet := content
+				if len(htmlSnippet) > 300 {
+					htmlSnippet = htmlSnippet[:300]
+				}
+				logger.Warnf("Download", "File %s: Stage 2 received HTML response (snippet: %q)", fileID, htmlSnippet)
+
+				contentLower := strings.ToLower(content)
+				if strings.Contains(contentLower, "quota exceeded") || strings.Contains(contentLower, "too many users have viewed or downloaded") {
 					if notifier != nil && currentCookieID != "" {
 						notifier(currentCookieID)
 					}
@@ -425,11 +463,19 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 							continue
 						}
 					}
+					if bm := d.GetBypassManager(); bm != nil && bm.IsAvailable() && bm.IsAutoBypass() {
+						desired := ""
+						if len(desiredFilename) > 0 {
+							desired = desiredFilename[0]
+						}
+						logger.Warnf("Download", "File %s: Quota exceeded in stage 2. Executing automated OAuth bypass via ggdl_temp...", fileID)
+						return bm.ExecuteBypass(ctx, fileID, targetFolder, desired, onProgress)
+					}
 					errMsg := "Google Drive quota exceeded for this file (all available accounts in Cookie Pool exhausted / 24h cooldown)"
 					logger.Errorf("Download", "File %s: %s", fileID, errMsg)
 					return "", 0, errors.New(errMsg)
 				}
-				errMsg := "Google Drive returned HTML instead of file (file may require private access or login)"
+				errMsg := fmt.Sprintf("Google Drive returned HTML instead of file (file may require private access or login): %s", strings.TrimSpace(htmlSnippet))
 				logger.Errorf("Download", "File %s: %s", fileID, errMsg)
 				return "", 0, errors.New(errMsg)
 			}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,9 +20,11 @@ import (
 )
 
 type Server struct {
-	manager  *queue.Manager
-	authMgr  *auth.Manager
-	distPath string
+	manager   *queue.Manager
+	authMgr   *auth.Manager
+	oauthMgr  *gdrive.OAuthManager
+	bypassMgr *gdrive.BypassManager
+	distPath  string
 }
 
 type AddRequest struct {
@@ -72,10 +75,30 @@ type AuthToggleRequest struct {
 }
 
 func NewServer(manager *queue.Manager, authMgr *auth.Manager, distPath string) *Server {
+	clientID, clientSecret, token, email, autoBypass := authMgr.GetOAuthSettings()
+
+	oauthMgr := gdrive.NewOAuthManager(
+		clientID,
+		clientSecret,
+		"",
+		token,
+		email,
+		func(t *gdrive.OAuthToken, em string) {
+			_ = authMgr.SaveOAuthToken(t, em)
+		},
+	)
+
+	bypassMgr := gdrive.NewBypassManager(oauthMgr, autoBypass)
+
+	// Link bypass manager to downloader for automatic quota bypass
+	manager.Downloader().SetBypassManager(bypassMgr)
+
 	s := &Server{
-		manager:  manager,
-		authMgr:  authMgr,
-		distPath: distPath,
+		manager:   manager,
+		authMgr:   authMgr,
+		oauthMgr:  oauthMgr,
+		bypassMgr: bypassMgr,
+		distPath:  distPath,
 	}
 
 	// Link cookie pool from authMgr to downloader with auto-failover and 24h lockout
@@ -131,6 +154,16 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/gdrive/cookies/reset-all", s.handleResetAllGoogleCookies)
 	mux.HandleFunc("DELETE /api/gdrive/cookies/{id}", s.handleDeleteGoogleCookie)
 	mux.HandleFunc("POST /api/gdrive/cookies/{id}/reset", s.handleResetGoogleCookie)
+
+	// Google OAuth 2.0 & Quota Bypass endpoints
+	mux.HandleFunc("GET /api/gdrive/oauth/status", s.handleGetOAuthStatus)
+	mux.HandleFunc("POST /api/gdrive/oauth/config", s.handleSaveOAuthConfig)
+	mux.HandleFunc("GET /api/gdrive/oauth/auth-url", s.handleGetOAuthAuthURL)
+	mux.HandleFunc("GET /api/gdrive/oauth/callback", s.handleOAuthCallback)
+	mux.HandleFunc("POST /api/gdrive/oauth/manual-code", s.handleOAuthManualCode)
+	mux.HandleFunc("POST /api/gdrive/oauth/disconnect", s.handleOAuthDisconnect)
+	mux.HandleFunc("POST /api/gdrive/oauth/cleanup-temp", s.handleOAuthCleanupTemp)
+
 	mux.HandleFunc("GET /api/fs/browse", s.handleBrowseFS)
 	mux.HandleFunc("POST /api/fs/mkdir", s.handleCreateFolder)
 
@@ -190,9 +223,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// 1. Static SPA files (/ or /assets/..., /favicon.svg, etc.)
 		// 2. /api/auth/status
 		// 3. /api/auth/login
+		// 4. /api/gdrive/oauth/callback (Google redirects the user here)
 		if !strings.HasPrefix(path, "/api/") ||
 			path == "/api/auth/status" ||
-			path == "/api/auth/login" {
+			path == "/api/auth/login" ||
+			path == "/api/gdrive/oauth/callback" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1011,4 +1046,380 @@ func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) {
 	logger.Clear()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+type OAuthStatusResponse struct {
+	Configured bool       `json:"configured"`
+	Connected  bool       `json:"connected"`
+	ClientID   string     `json:"client_id"`
+	Email      string     `json:"email"`
+	Expiry     *time.Time `json:"expiry,omitempty"`
+	AutoBypass bool       `json:"auto_bypass"`
+}
+
+func (s *Server) handleGetOAuthStatus(w http.ResponseWriter, r *http.Request) {
+	isConfigured, isConnected, email, expiry, clientID := s.oauthMgr.GetStatus()
+	autoBypass := s.bypassMgr.IsAutoBypass()
+
+	res := OAuthStatusResponse{
+		Configured: isConfigured,
+		Connected:  isConnected,
+		ClientID:   clientID,
+		Email:      email,
+		Expiry:     expiry,
+		AutoBypass: autoBypass,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
+type SaveOAuthConfigRequest struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	AutoBypass   bool   `json:"auto_bypass"`
+}
+
+func (s *Server) handleSaveOAuthConfig(w http.ResponseWriter, r *http.Request) {
+	var req SaveOAuthConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	req.ClientID = strings.TrimSpace(req.ClientID)
+	req.ClientSecret = strings.TrimSpace(req.ClientSecret)
+
+	_ = s.authMgr.SetOAuthCredentials(req.ClientID, req.ClientSecret, req.AutoBypass)
+	s.oauthMgr.UpdateConfig(req.ClientID, req.ClientSecret, "")
+	s.bypassMgr.SetAutoBypass(req.AutoBypass)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (s *Server) getRequestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return proto
+	}
+	return "http"
+}
+
+func (s *Server) handleGetOAuthAuthURL(w http.ResponseWriter, r *http.Request) {
+	scheme := s.getRequestScheme(r)
+	redirectURI := fmt.Sprintf("%s://%s/api/gdrive/oauth/callback", scheme, r.Host)
+
+	// Update OAuth manager with active redirectURI
+	clientID, clientSecret, _, _, _ := s.authMgr.GetOAuthSettings()
+	s.oauthMgr.UpdateConfig(clientID, clientSecret, redirectURI)
+
+	authURL, err := s.oauthMgr.BuildAuthURL("gddl_state")
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"auth_url":     authURL,
+		"redirect_uri": redirectURI,
+	})
+}
+
+func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	errParam := r.URL.Query().Get("error")
+	if errParam != "" {
+		errDesc := r.URL.Query().Get("error_description")
+		if errDesc == "" {
+			errDesc = errParam
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Authentication Error</title>
+<style>
+body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+.card { background: #1e293b; border: 1px solid #ef4444; border-radius: 12px; padding: 28px; max-width: 480px; text-align: center; }
+h2 { color: #f87171; margin-top: 0; }
+p { color: #94a3b8; font-size: 14px; }
+button { margin-top: 16px; padding: 8px 20px; background: #334155; color: white; border: none; border-radius: 6px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>Google Authorization Failed</h2>
+  <p>%s</p>
+  <button onclick="window.close()">Close Window</button>
+</div>
+</body>
+</html>`, html.EscapeString(errDesc))
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Error(w, "missing authorization code parameter", http.StatusBadRequest)
+		return
+	}
+
+	scheme := s.getRequestScheme(r)
+	redirectURI := fmt.Sprintf("%s://%s/api/gdrive/oauth/callback", scheme, r.Host)
+	clientID, clientSecret, _, _, _ := s.authMgr.GetOAuthSettings()
+	s.oauthMgr.UpdateConfig(clientID, clientSecret, redirectURI)
+
+	_, email, err := s.oauthMgr.ExchangeCode(r.Context(), code)
+	if err != nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Token Exchange Failed</title>
+<style>
+body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+.card { background: #1e293b; border: 1px solid #ef4444; border-radius: 12px; padding: 28px; max-width: 480px; text-align: center; }
+h2 { color: #f87171; margin-top: 0; }
+p { color: #94a3b8; font-size: 14px; word-break: break-all; }
+button { margin-top: 16px; padding: 8px 20px; background: #334155; color: white; border: none; border-radius: 6px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>Token Exchange Failed</h2>
+  <p>%s</p>
+  <button onclick="window.close()">Close Window</button>
+</div>
+</body>
+</html>`, html.EscapeString(err.Error()))
+		return
+	}
+
+	fullURL := fmt.Sprintf("%s://%s%s", scheme, r.Host, r.RequestURI)
+
+	htmlTmpl := `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google Drive Authenticated - GDDL</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #090d16;
+      color: #f1f5f9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+    .card {
+      background: #111827;
+      border: 1px solid #10b981;
+      border-radius: 16px;
+      padding: 32px;
+      max-width: 560px;
+      width: 100%;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+      text-align: center;
+    }
+    .icon {
+      width: 56px;
+      height: 56px;
+      background: rgba(16, 185, 129, 0.15);
+      color: #10b981;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      margin-bottom: 16px;
+    }
+    h2 {
+      margin: 0 0 8px 0;
+      font-size: 22px;
+      font-weight: 700;
+      color: #ffffff;
+    }
+    .email {
+      font-size: 15px;
+      color: #10b981;
+      font-weight: 600;
+      background: rgba(16, 185, 129, 0.1);
+      padding: 6px 14px;
+      border-radius: 20px;
+      display: inline-block;
+      margin: 8px 0 16px 0;
+    }
+    p {
+      color: #94a3b8;
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 0 0 20px 0;
+    }
+    .manual-box {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 16px;
+      text-align: left;
+      margin-top: 16px;
+    }
+    .manual-label {
+      font-size: 11px;
+      color: #94a3b8;
+      font-weight: 600;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      display: block;
+      letter-spacing: 0.05em;
+    }
+    .code-input {
+      width: 100%;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      color: #38bdf8;
+      padding: 8px 10px;
+      font-family: monospace;
+      font-size: 12px;
+      box-sizing: border-box;
+      margin-bottom: 8px;
+    }
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      margin-top: 20px;
+    }
+    .btn {
+      padding: 9px 18px;
+      border-radius: 8px;
+      border: none;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-primary {
+      background: #10b981;
+      color: #0f172a;
+    }
+    .btn-primary:hover {
+      background: #059669;
+    }
+    .btn-secondary {
+      background: #334155;
+      color: #f1f5f9;
+    }
+    .btn-secondary:hover {
+      background: #475569;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">✓</div>
+    <h2>Google Drive Connected!</h2>
+    <div class="email">{{EMAIL}}</div>
+    <p>Authentication was successful. GDDL can now automatically clone and bypass quota-exceeded files into <b>ggdl_temp</b>.</p>
+
+    <div class="manual-box">
+      <span class="manual-label">Callback URL / Authorization Code (rclone style)</span>
+      <input type="text" id="urlInput" class="code-input" readonly value="{{FULL_URL}}" />
+      <button class="btn btn-secondary" style="width: 100%;" onclick="copyURL()">Copy Callback URL</button>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="closeTab()">Close Window</button>
+    </div>
+  </div>
+
+  <script>
+    function copyURL() {
+      const el = document.getElementById('urlInput');
+      el.select();
+      navigator.clipboard.writeText(el.value);
+      alert('Callback URL copied to clipboard!');
+    }
+    function closeTab() {
+      window.close();
+    }
+    try {
+      if (window.opener) {
+        window.opener.postMessage({ type: 'gdrive-oauth-success', email: '{{EMAIL}}' }, '*');
+        setTimeout(function() { window.close(); }, 2500);
+      }
+    } catch(e) {}
+  </script>
+</body>
+</html>`
+
+	htmlOut := strings.ReplaceAll(htmlTmpl, "{{EMAIL}}", html.EscapeString(email))
+	htmlOut = strings.ReplaceAll(htmlOut, "{{FULL_URL}}", html.EscapeString(fullURL))
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(htmlOut))
+}
+
+type ManualCodeRequest struct {
+	Code string `json:"code"`
+}
+
+func (s *Server) handleOAuthManualCode(w http.ResponseWriter, r *http.Request) {
+	var req ManualCodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	code := gdrive.ExtractCode(req.Code)
+	if code == "" {
+		http.Error(w, `{"error":"authorization code or URL is empty"}`, http.StatusBadRequest)
+		return
+	}
+
+	scheme := s.getRequestScheme(r)
+	redirectURI := fmt.Sprintf("%s://%s/api/gdrive/oauth/callback", scheme, r.Host)
+	clientID, clientSecret, _, _, _ := s.authMgr.GetOAuthSettings()
+	s.oauthMgr.UpdateConfig(clientID, clientSecret, redirectURI)
+
+	_, email, err := s.oauthMgr.ExchangeCode(r.Context(), code)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"email":   email,
+	})
+}
+
+func (s *Server) handleOAuthDisconnect(w http.ResponseWriter, r *http.Request) {
+	s.oauthMgr.ClearToken()
+	_ = s.authMgr.ClearOAuthToken()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (s *Server) handleOAuthCleanupTemp(w http.ResponseWriter, r *http.Request) {
+	count, err := s.bypassMgr.EmptyTempFolder(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"deleted_count": count,
+	})
 }

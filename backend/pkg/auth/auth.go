@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gdrive-downloader/pkg/gdrive"
 )
 
 var (
@@ -73,14 +75,19 @@ type CookieEntry struct {
 }
 
 type Config struct {
-	AuthEnabled    bool          `json:"auth_enabled"`
-	Username       string        `json:"username"`
-	PasswordHash   string        `json:"password_hash"`
-	Salt           string        `json:"salt"`
-	DownloadFolder string        `json:"download_folder"`
-	MaxConcurrency int           `json:"max_concurrency"`
-	GoogleCookie   string        `json:"google_cookie"`
-	GoogleCookies  []CookieEntry `json:"google_cookies,omitempty"`
+	AuthEnabled             bool               `json:"auth_enabled"`
+	Username                string             `json:"username"`
+	PasswordHash            string             `json:"password_hash"`
+	Salt                    string             `json:"salt"`
+	DownloadFolder          string             `json:"download_folder"`
+	MaxConcurrency          int                `json:"max_concurrency"`
+	GoogleCookie            string             `json:"google_cookie"`
+	GoogleCookies           []CookieEntry      `json:"google_cookies,omitempty"`
+	GoogleOAuthClientID     string             `json:"google_oauth_client_id,omitempty"`
+	GoogleOAuthClientSecret string             `json:"google_oauth_client_secret,omitempty"`
+	GoogleOAuthToken        *gdrive.OAuthToken `json:"google_oauth_token,omitempty"`
+	GoogleOAuthEmail        string             `json:"google_oauth_email,omitempty"`
+	AutoBypassQuota         bool               `json:"auto_bypass_quota"`
 }
 
 type SessionInfo struct {
@@ -144,12 +151,13 @@ func (m *Manager) loadOrInit(defaultFolder string, defaultConcurrency int) error
 	// First time initialization with defaults
 	salt := generateRandomHex(16)
 	m.config = Config{
-		AuthEnabled:    true,
-		Username:       "admin",
-		Salt:           salt,
-		PasswordHash:   hashPassword("adminadmin", salt),
-		DownloadFolder: defaultFolder,
-		MaxConcurrency: defaultConcurrency,
+		AuthEnabled:     true,
+		Username:        "admin",
+		Salt:            salt,
+		PasswordHash:    hashPassword("adminadmin", salt),
+		DownloadFolder:  defaultFolder,
+		MaxConcurrency:  defaultConcurrency,
+		AutoBypassQuota: true,
 	}
 
 	return m.saveLocked()
@@ -350,6 +358,44 @@ func (m *Manager) GetNextActiveCookie(excludeID ...string) (CookieEntry, bool) {
 		return *c, true
 	}
 	return CookieEntry{}, false
+}
+
+func (m *Manager) GetOAuthSettings() (clientID string, clientSecret string, token *gdrive.OAuthToken, email string, autoBypass bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.GoogleOAuthClientID, m.config.GoogleOAuthClientSecret, m.config.GoogleOAuthToken, m.config.GoogleOAuthEmail, m.config.AutoBypassQuota
+}
+
+func (m *Manager) SetOAuthCredentials(clientID, clientSecret string, autoBypass bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.config.GoogleOAuthClientID = strings.TrimSpace(clientID)
+	m.config.GoogleOAuthClientSecret = strings.TrimSpace(clientSecret)
+	m.config.AutoBypassQuota = autoBypass
+	return m.saveLocked()
+}
+
+func (m *Manager) SaveOAuthToken(token *gdrive.OAuthToken, email string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.config.GoogleOAuthToken = token
+	m.config.GoogleOAuthEmail = email
+	return m.saveLocked()
+}
+
+func (m *Manager) ClearOAuthToken() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.config.GoogleOAuthToken = nil
+	m.config.GoogleOAuthEmail = ""
+	return m.saveLocked()
+}
+
+func (m *Manager) SetAutoBypassQuota(enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.config.AutoBypassQuota = enabled
+	return m.saveLocked()
 }
 
 func (m *Manager) IsAuthEnabled() bool {
