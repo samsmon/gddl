@@ -345,40 +345,6 @@ func (d *Downloader) Download(
 			totalBytes = resp.ContentLength
 		}
 
-		chunks := d.GetChunksPerDownload()
-		shouldUseChunks := chunks > 1 && totalBytes > 10*1024*1024 && (existingBytes == 0 || (totalBytes-existingBytes) > 5*1024*1024 || chunked.HasChunkMeta(partPath))
-		if shouldUseChunks {
-			resp.Body.Close()
-			logger.Infof("Discord", "Downloading '%s' (%d bytes) with %d parallel chunk streams", filename, totalBytes, chunks)
-
-			headers := http.Header{}
-			applyBrowserHeadersToHeader(headers)
-
-			copied, err := d.chunkedDownloader.DownloadSegmented(
-				ctx,
-				partPath,
-				rawURL,
-				totalBytes,
-				headers,
-				chunks,
-				onProgress,
-			)
-			if err != nil {
-				return filename, copied, err
-			}
-
-			// Rename partPath to destPath
-			if err := os.Rename(partPath, destPath); err != nil {
-				_ = os.Remove(destPath)
-				if err := os.Rename(partPath, destPath); err != nil {
-					return filename, copied, fmt.Errorf("failed to finalize downloaded file: %w", err)
-				}
-			}
-
-			logger.Successf("Discord", "Saved '%s' successfully (%d bytes) via %d streams", filename, copied, chunks)
-			return filename, copied, nil
-		}
-
 		if resp.StatusCode == http.StatusPartialContent && existingBytes > 0 {
 			out, err = os.OpenFile(partPath, os.O_WRONLY|os.O_APPEND, 0644)
 			if err != nil {

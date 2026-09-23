@@ -394,6 +394,9 @@ func (m *Manager) worker() {
 		var err error
 
 		if discord.IsDiscordURL(item.URL) {
+			item.mu.Lock()
+			item.Chunks = 1
+			item.mu.Unlock()
 			filename, _, err = m.discordDownloader.Download(
 				ctx,
 				item.URL,
@@ -405,11 +408,7 @@ func (m *Manager) worker() {
 					item.Speed = speed
 					item.ETASeconds = etaSeconds
 					item.Percentage = percentage
-					if totalBytes <= 10*1024*1024 {
-						item.Chunks = 1
-					} else {
-						item.Chunks = configuredChunks
-					}
+					item.Chunks = 1
 					item.mu.Unlock()
 				},
 				desiredName,

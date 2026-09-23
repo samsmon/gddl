@@ -29,7 +29,7 @@ func TestExtractDiscordFileInfo(t *testing.T) {
 	}
 }
 
-func TestDiscordDownloader_ChunkedDownload(t *testing.T) {
+func TestDiscordDownloader_Download(t *testing.T) {
 	// Generate 12MB test payload (> 10MB threshold for chunking)
 	testData := make([]byte, 12*1024*1024)
 	if _, err := rand.Read(testData); err != nil {

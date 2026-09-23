@@ -437,8 +437,11 @@ func (bm *BypassManager) DownloadClonedFile(
 	if filename == "" {
 		filename = fmt.Sprintf("gdrive_%s.bin", clonedID)
 	}
-	destPath := UniqueFilePath(filepath.Join(targetFolder, filename))
-	filename = filepath.Base(destPath)
+	destPath := filepath.Join(targetFolder, filename)
+	if desiredFilename == "" {
+		destPath = UniqueFilePath(destPath)
+		filename = filepath.Base(destPath)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {

@@ -2,11 +2,13 @@ package chunked
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -48,8 +50,47 @@ type Downloader struct {
 	client *http.Client
 }
 
-// NewDownloader creates a new chunked Downloader with the provided HTTP client.
-func NewDownloader(client *http.Client) *Downloader {
+// NewDownloader creates a new chunked Downloader with multi-socket HTTP/1.1 transport.
+// Forcing HTTP/1.1 avoids HTTP/2 stream multiplexing onto a single TCP socket,
+// allowing each parallel chunk stream to bypass provider per-connection rate limits (e.g. 10MB/s per TCP socket).
+func NewDownloader(baseClient *http.Client) *Downloader {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, "tcp4", addr)
+			if err != nil {
+				return dialer.DialContext(ctx, network, addr)
+			}
+			return conn, nil
+		},
+		// Disabling HTTP/2 is CRITICAL for multi-chunk throughput acceleration:
+		// HTTP/2 multiplexes all requests onto a single TCP socket, which causes Google/CDNs
+		// to rate-limit all chunk streams collectively to ~10MB/s.
+		// By forcing HTTP/1.1 with high MaxIdleConnsPerHost, each chunk gets its own independent TCP connection.
+		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		DisableCompression:   true,
+		MaxIdleConns:          200,
+		MaxIdleConnsPerHost:   50,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ReadBufferSize:        1024 * 1024,
+		WriteBufferSize:       1024 * 1024,
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   0,
+	}
+	if baseClient != nil && baseClient.Jar != nil {
+		client.Jar = baseClient.Jar
+	}
+
 	return &Downloader{
 		client: client,
 	}
