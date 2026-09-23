@@ -85,6 +85,7 @@ type Config struct {
 	GoogleCookies           []CookieEntry      `json:"google_cookies,omitempty"`
 	GoogleOAuthClientID     string             `json:"google_oauth_client_id,omitempty"`
 	GoogleOAuthClientSecret string             `json:"google_oauth_client_secret,omitempty"`
+	GoogleOAuthRedirectURI  string             `json:"google_oauth_redirect_uri,omitempty"`
 	GoogleOAuthToken        *gdrive.OAuthToken `json:"google_oauth_token,omitempty"`
 	GoogleOAuthEmail        string             `json:"google_oauth_email,omitempty"`
 	AutoBypassQuota         bool               `json:"auto_bypass_quota"`
@@ -360,19 +361,26 @@ func (m *Manager) GetNextActiveCookie(excludeID ...string) (CookieEntry, bool) {
 	return CookieEntry{}, false
 }
 
-func (m *Manager) GetOAuthSettings() (clientID string, clientSecret string, token *gdrive.OAuthToken, email string, autoBypass bool) {
+func (m *Manager) GetOAuthSettings() (clientID string, clientSecret string, redirectURI string, token *gdrive.OAuthToken, email string, autoBypass bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.config.GoogleOAuthClientID, m.config.GoogleOAuthClientSecret, m.config.GoogleOAuthToken, m.config.GoogleOAuthEmail, m.config.AutoBypassQuota
+	return m.config.GoogleOAuthClientID, m.config.GoogleOAuthClientSecret, m.config.GoogleOAuthRedirectURI, m.config.GoogleOAuthToken, m.config.GoogleOAuthEmail, m.config.AutoBypassQuota
 }
 
-func (m *Manager) SetOAuthCredentials(clientID, clientSecret string, autoBypass bool) error {
+func (m *Manager) SetOAuthCredentials(clientID, clientSecret, redirectURI string, autoBypass bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.config.GoogleOAuthClientID = strings.TrimSpace(clientID)
 	m.config.GoogleOAuthClientSecret = strings.TrimSpace(clientSecret)
+	m.config.GoogleOAuthRedirectURI = strings.TrimSpace(redirectURI)
 	m.config.AutoBypassQuota = autoBypass
 	return m.saveLocked()
+}
+
+func (m *Manager) GetOAuthRedirectURI() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.GoogleOAuthRedirectURI
 }
 
 func (m *Manager) SaveOAuthToken(token *gdrive.OAuthToken, email string) error {

@@ -657,6 +657,27 @@
   let oauthError = $state('');
   let oauthAuthURL = $state('');
   let showClientSecret = $state(false);
+  let oauthRedirectURI = $state('');
+  let oauthRedirectURIOverride = $state('');
+  let copiedRedirectURI = $state(false);
+
+  function copyRedirectURIToClipboard(text) {
+    if (!text) return;
+    if (navigator.clipboard && window.isSecureContext && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => {
+        copiedRedirectURI = true;
+        setTimeout(() => copiedRedirectURI = false, 2000);
+      }).catch(() => {
+        fallbackCopy(text);
+        copiedRedirectURI = true;
+        setTimeout(() => copiedRedirectURI = false, 2000);
+      });
+    } else {
+      fallbackCopy(text);
+      copiedRedirectURI = true;
+      setTimeout(() => copiedRedirectURI = false, 2000);
+    }
+  }
 
   async function fetchOAuthStatus() {
     try {
@@ -670,6 +691,8 @@
         }
         oauthEmail = data.email || '';
         oauthAutoBypass = data.auto_bypass ?? true;
+        oauthRedirectURI = data.redirect_uri || '';
+        oauthRedirectURIOverride = data.redirect_uri_override || '';
       }
     } catch (e) {
       console.warn('Failed to fetch OAuth status', e);
@@ -687,12 +710,14 @@
         body: JSON.stringify({
           client_id: oauthClientID.trim(),
           client_secret: oauthClientSecret.trim(),
+          redirect_uri: oauthRedirectURIOverride.trim(),
           auto_bypass: oauthAutoBypass
         })
       });
       if (res.ok) {
         oauthMessage = 'Google OAuth credentials saved successfully!';
         oauthConfigured = !!oauthClientID.trim();
+        await fetchOAuthStatus();
         setTimeout(() => { oauthMessage = ''; }, 4000);
       } else {
         const err = await res.json().catch(() => ({ error: 'Failed to save OAuth credentials' }));
@@ -709,7 +734,7 @@
     oauthError = '';
     oauthMessage = '';
     try {
-      if (oauthClientID.trim() || oauthClientSecret.trim()) {
+      if (oauthClientID.trim() || oauthClientSecret.trim() || oauthRedirectURIOverride.trim()) {
         await saveOAuthConfig();
       }
 
@@ -720,6 +745,9 @@
       }
       const data = await res.json();
       oauthAuthURL = data.auth_url;
+      if (data.redirect_uri) {
+        oauthRedirectURI = data.redirect_uri;
+      }
 
       const width = 600;
       const height = 700;
@@ -3455,6 +3483,26 @@
               </div>
             {/if}
 
+            <!-- Authorized Redirect URI Info Box -->
+            <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px;">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+                <span style="font-size: 11px; font-weight: 600; color: #10b981;">Authorized Redirect URI (Wajib di Google Cloud Console):</span>
+                <button
+                  class="btn btn-secondary"
+                  onclick={() => copyRedirectURIToClipboard(oauthRedirectURI || `http://localhost:${window.location.port || '8099'}/api/gdrive/oauth/callback`)}
+                  style="padding: 2px 8px; font-size: 10px; background: rgba(16, 185, 129, 0.15); color: #10b981; border-color: rgba(16, 185, 129, 0.3);"
+                >
+                  {copiedRedirectURI ? '✓ Copied!' : 'Copy Redirect URI'}
+                </button>
+              </div>
+              <code style="font-size: 11px; color: #38bdf8; word-break: break-all; font-family: var(--font-mono); background: rgba(0,0,0,0.3); padding: 3px 6px; border-radius: 4px; display: block; margin-top: 4px;">
+                {oauthRedirectURI || `http://localhost:${window.location.port || '8099'}/api/gdrive/oauth/callback`}
+              </code>
+              <span style="font-size: 9.5px; color: var(--text-dim); display: block; margin-top: 5px; line-height: 1.35;">
+                Catatan: Google menolak IP lokal/LAN (seperti 192.168.x.x) dengan Error 400. GDDL otomatis mengarahkan callback ke localhost.
+              </span>
+            </div>
+
             <div style="background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px;">
               <div style="display: flex; align-items: center; justify-content: space-between;">
                 <span style="font-weight: 600; font-size: 12px; color: var(--accent-blue);">Google Cloud OAuth 2.0 Credentials</span>
@@ -3483,6 +3531,19 @@
                   </button>
                 </div>
               </div>
+
+              <details style="font-size: 10.5px; color: var(--text-muted); margin-top: 2px;">
+                <summary style="cursor: pointer; color: var(--text-dim); font-size: 10px;">Pengaturan Lanjutan: Custom Redirect URI Override (Opsional)</summary>
+                <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 4px;">
+                  <input
+                    type="text"
+                    bind:value={oauthRedirectURIOverride}
+                    placeholder="Kosongkan jika default (auto localhost:[port])"
+                    style="padding: 5px 8px; font-size: 11px; font-family: var(--font-mono);"
+                  />
+                  <span style="font-size: 9.5px; color: var(--text-dim);">Isi hanya jika menggunakan domain HTTPS publik sendiri, Cloudflare Tunnel, atau custom reverse proxy.</span>
+                </div>
+              </details>
 
               <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-top: 4px; font-size: 11px; color: var(--text-main);">
                 <input type="checkbox" bind:checked={oauthAutoBypass} style="accent-color: var(--accent-blue);" />
@@ -3516,7 +3577,7 @@
                   <li>Di menu <strong>Enabled APIs &amp; Services</strong>, cari dan aktifkan <strong>Google Drive API</strong>.</li>
                   <li>Di <strong>OAuth consent screen</strong>, pilih <em>External</em> &gt; isi nama app (misal <em>GDDL</em>) &gt; tambahkan email Anda sebagai Test User.</li>
                   <li>Di menu <strong>Credentials</strong> &gt; <em>Create Credentials</em> &gt; pilih <strong>OAuth client ID</strong> &gt; Application type: <strong>Web application</strong>.</li>
-                  <li>Di bagian <strong>Authorized redirect URIs</strong>, tambahkan:<br/><code style="color: var(--accent-green); background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px;">http://127.0.0.1:8080/api/gdrive/oauth/callback</code></li>
+                  <li>Di bagian <strong>Authorized redirect URIs</strong>, tambahkan:<br/><code style="color: var(--accent-green); background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px;">{oauthRedirectURI || `http://localhost:${window.location.port || '8099'}/api/gdrive/oauth/callback`}</code></li>
                   <li>Salin Client ID dan Client Secret ke form di atas, lalu klik <strong>Connect Google Drive</strong>.</li>
                 </ol>
               </details>
@@ -3529,13 +3590,13 @@
                 <span style="font-size: 9.5px; color: var(--text-dim);">Fallback Input</span>
               </div>
               <span style="font-size: 10px; color: var(--text-muted); line-height: 1.4;">
-                Jika Google login berhasil di browser tapi jendela tidak menutup otomatis (misal berjalan di Docker/remote server), salin URL dari address bar browser setelah approve login dan tempel di bawah:
+                Jika Google login berhasil di browser atau Anda membuka GDDL dari perangkat lain di LAN (misal HP/tablet), salin URL dari address bar browser setelah approve login dan tempel di bawah:
               </span>
               <div style="display: flex; gap: 6px;">
                 <input
                   type="text"
                   bind:value={oauthManualCode}
-                  placeholder="Tempel URL callback lengkap misal: http://127.0.0.1:8080/api/gdrive/oauth/callback?code=... atau kode 4/0A..."
+                  placeholder={`Tempel URL callback lengkap misal: ${oauthRedirectURI || 'http://localhost:8099/api/gdrive/oauth/callback'}?code=... atau kode 4/0A...`}
                   style="flex: 1; padding: 5px 8px; font-size: 11px; font-family: var(--font-mono);"
                 />
                 <button
