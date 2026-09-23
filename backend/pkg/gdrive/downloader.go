@@ -132,6 +132,8 @@ func NewDownloader() (*Downloader, error) {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		ReadBufferSize:        1024 * 1024, // 1MB buffer to handle high-bandwidth Gigabit/Fast Wi-Fi connections
+		WriteBufferSize:       1024 * 1024,
 	}
 
 	return &Downloader{
@@ -362,7 +364,9 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 		onProgress:     onProgress,
 	}
 
-	copied, err := io.Copy(out, pr)
+	// Use 1MB buffer instead of default 32KB to eliminate syscall overhead for high-speed Wi-Fi/Gigabit connections
+	buf := make([]byte, 1024*1024)
+	copied, err := io.CopyBuffer(out, pr, buf)
 	if err != nil {
 		out.Close()
 		_ = os.Remove(destPath)

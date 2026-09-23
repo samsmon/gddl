@@ -73,6 +73,8 @@ func NewDownloader() *Downloader {
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 20,
 		IdleConnTimeout:     90 * time.Second,
+		ReadBufferSize:      1024 * 1024, // 1MB buffer for gigabit / fast throughput
+		WriteBufferSize:     1024 * 1024,
 	}
 
 	return &Downloader{
@@ -328,7 +330,8 @@ func (d *Downloader) Download(
 			onProgress:     onProgress,
 		}
 
-		written, copyErr := io.Copy(out, pr)
+		buf := make([]byte, 1024*1024)
+		written, copyErr := io.CopyBuffer(out, pr, buf)
 		out.Close()
 		resp.Body.Close()
 

@@ -215,7 +215,8 @@ func CompressFolderToZip(ctx context.Context, srcDir, zipPath string, onProgress
 			return err
 		}
 
-		_, err = io.Copy(w, f)
+		buf := make([]byte, 1024*1024)
+		_, err = io.CopyBuffer(w, f, buf)
 		f.Close()
 		if err != nil {
 			return err
