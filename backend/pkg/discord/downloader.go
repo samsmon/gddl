@@ -41,7 +41,7 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 		now := time.Now()
 		elapsed := now.Sub(pr.lastReport).Seconds()
 
-		if elapsed >= 0.3 {
+		if elapsed >= 0.15 {
 			speed := int64(float64(pr.downloaded-pr.lastDownloaded) / elapsed)
 			pr.lastDownloaded = pr.downloaded
 			pr.lastReport = now

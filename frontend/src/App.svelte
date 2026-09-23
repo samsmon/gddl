@@ -4732,7 +4732,8 @@
   .native-progress-fill {
     height: 100%;
     background: var(--accent-blue);
-    transition: width 0.2s;
+    transition: width 0.18s linear;
+    will-change: width;
   }
   .native-progress-fill.prog-done { background: var(--accent-green); }
   .native-progress-fill.prog-corrupt { background: var(--accent-red); }

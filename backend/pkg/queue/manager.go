@@ -337,7 +337,7 @@ func (m *Manager) triggerBroadcast() {
 }
 
 func (m *Manager) broadcasterLoop() {
-	ticker := time.NewTicker(400 * time.Millisecond)
+	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {

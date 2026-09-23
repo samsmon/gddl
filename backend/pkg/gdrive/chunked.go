@@ -105,7 +105,7 @@ func (cd *ChunkedDownloader) DownloadSegmented(
 	defer cancelProgress()
 
 	go func() {
-		ticker := time.NewTicker(250 * time.Millisecond)
+		ticker := time.NewTicker(150 * time.Millisecond)
 		defer ticker.Stop()
 
 		var lastDownloaded int64 = 0
