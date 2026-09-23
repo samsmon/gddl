@@ -43,6 +43,53 @@
     }
   }
 
+  let showNewFolderInput = $state(false);
+  let newFolderName = $state('');
+  let isCreatingFolder = $state(false);
+
+  function startNewFolder() {
+    newFolderName = '';
+    showNewFolderInput = true;
+  }
+
+  function cancelNewFolder() {
+    newFolderName = '';
+    showNewFolderInput = false;
+  }
+
+  async function createFolder() {
+    const trimmed = newFolderName.trim();
+    if (!trimmed) return;
+    isCreatingFolder = true;
+    errorMsg = '';
+    try {
+      const res = await fetch('/api/fs/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parent: currentPath,
+          name: trimmed
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Failed to create folder' }));
+        throw new Error(err.error || 'Failed to create folder');
+      }
+      const data = await res.json();
+      showNewFolderInput = false;
+      newFolderName = '';
+      if (data.path) {
+        await browse(data.path);
+      } else {
+        await browse(currentPath);
+      }
+    } catch (e) {
+      errorMsg = 'Error creating folder: ' + e.message;
+    } finally {
+      isCreatingFolder = false;
+    }
+  }
+
   // Parse path for breadcrumb navigation
   let breadcrumbs = $derived.by(() => {
     if (!currentPath) return [];
@@ -133,7 +180,40 @@
           </button>
         {/each}
       </div>
+
+      <button
+        class="nav-btn-action"
+        title="Create New Subfolder in Current Directory"
+        onclick={startNewFolder}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          <line x1="12" y1="11" x2="12" y2="17"></line>
+          <line x1="9" y1="14" x2="15" y2="14"></line>
+        </svg>
+        <span>New Folder</span>
+      </button>
     </div>
+
+    {#if showNewFolderInput}
+      <div class="new-folder-bar">
+        <span class="new-folder-label">Folder Name:</span>
+        <input
+          type="text"
+          bind:value={newFolderName}
+          placeholder="e.g. MyDownloads, Anime, FLAC..."
+          autofocus
+          onkeydown={(e) => {
+            if (e.key === 'Enter') createFolder();
+            if (e.key === 'Escape') cancelNewFolder();
+          }}
+        />
+        <button class="btn-create" disabled={!newFolderName.trim() || isCreatingFolder} onclick={createFolder}>
+          {isCreatingFolder ? 'Creating...' : 'Create'}
+        </button>
+        <button class="btn-create-cancel" onclick={cancelNewFolder}>Cancel</button>
+      </div>
+    {/if}
 
     <!-- Folder Browser List -->
     <div class="folder-list-container">
@@ -331,6 +411,7 @@
     color: var(--text-main);
     white-space: nowrap;
     padding-bottom: 2px;
+    flex: 1;
   }
   .crumb-item {
     background: transparent;
@@ -347,6 +428,76 @@
   }
   .crumb-separator {
     color: var(--text-dim);
+  }
+
+  .nav-btn-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    background: var(--btn-bg);
+    border: 1px solid var(--border-color);
+    color: var(--text-main);
+    padding: 0.25rem 0.6rem;
+    border-radius: 4px;
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .nav-btn-action:hover {
+    background: var(--btn-hover);
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
+  }
+  .new-folder-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 1rem;
+    background: var(--toolbar-bg);
+    border-bottom: 1px solid var(--border-color);
+  }
+  .new-folder-label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .new-folder-bar input {
+    flex: 1;
+    background: var(--input-bg);
+    border: 1px solid var(--accent-blue);
+    color: var(--text-main);
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    outline: none;
+  }
+  .btn-create {
+    background: var(--accent-blue);
+    color: #fff;
+    border: none;
+    padding: 0.25rem 0.65rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn-create:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn-create-cancel {
+    background: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-muted);
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+  .btn-create-cancel:hover {
+    color: var(--text-main);
   }
 
   /* Folder List */

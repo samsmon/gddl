@@ -2930,9 +2930,41 @@
           </div>
 
           <div class="form-group" style="margin-top: 1rem;">
-            <span class="form-title">Maximum Concurrent Downloads:</span>
-            <input type="number" min="1" max="5" bind:value={maxConcurrency} style="width: 100px;" />
-            <span class="form-hint">Recommended: 2 to 3 workers.</span>
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+              <span class="form-title">Maximum Concurrent Downloads:</span>
+              {#if maxConcurrency <= 2}
+                <span class="concurrency-badge badge-safe">Safe & Stable</span>
+              {:else if maxConcurrency === 3}
+                <span class="concurrency-badge badge-optimal">Recommended</span>
+              {:else if maxConcurrency === 4}
+                <span class="concurrency-badge badge-fast">High Speed / Caution</span>
+              {:else}
+                <span class="concurrency-badge badge-aggressive">Aggressive / High Risk</span>
+              {/if}
+            </div>
+
+            <div style="display: flex; align-items: center; gap: 10px; margin-top: 6px;">
+              <input type="number" min="1" max="5" bind:value={maxConcurrency} style="width: 80px;" />
+              <span class="form-hint" style="margin: 0;">Workers active simultaneously (1 to 5).</span>
+            </div>
+
+            <!-- Dynamic Risk & Behavior Hint Card -->
+            <div class="concurrency-hint-card {maxConcurrency <= 2 ? 'hint-safe' : maxConcurrency === 3 ? 'hint-optimal' : maxConcurrency === 4 ? 'hint-warn' : 'hint-danger'}">
+              {#if maxConcurrency <= 2}
+                <div class="hint-header">Safe Profile (1 - 2 Workers)</div>
+                <p>Minimal risk of IP throttling. Ideal for continuous background downloads and standard public Google Drive links without cookies.</p>
+              {:else if maxConcurrency === 3}
+                <div class="hint-header">Optimal Balance (3 Workers - Default)</div>
+                <p>Optimal balance between speed and reliability. Safely handles simultaneous Discord CDN and Google Drive streams with near-zero rate limiting.</p>
+              {:else if maxConcurrency === 4}
+                <div class="hint-header">High Concurrency Caution (4 Workers)</div>
+                <p><strong>Discord CDN:</strong> Fully safe and protected by internal anti-429 jitter.<br/>
+                <strong>Google Drive:</strong> Unauthenticated public downloads (>100MB) can trigger temporary IP quotas (Download quota exceeded / HTTP 403). Adding a Google session cookie in Settings is recommended to avoid rate limits.</p>
+              {:else}
+                <div class="hint-header">Aggressive Concurrency (5 Workers)</div>
+                <p>High probability of Google Drive IP-level connection throttling or temporary 24-hour file lockouts unless logged in with valid cookies. Discord CDN may experience connection queueing.</p>
+              {/if}
+            </div>
           </div>
 
           <!-- Divider -->
@@ -4179,6 +4211,83 @@
   }
   .btn-browse:hover {
     background: var(--btn-hover);
+  }
+  .concurrency-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .badge-safe {
+    background: rgba(46, 160, 67, 0.15);
+    color: var(--accent-green);
+    border: 1px solid rgba(46, 160, 67, 0.3);
+  }
+  .badge-optimal {
+    background: rgba(56, 139, 253, 0.15);
+    color: var(--accent-blue);
+    border: 1px solid rgba(56, 139, 253, 0.3);
+  }
+  .badge-fast {
+    background: rgba(210, 153, 34, 0.15);
+    color: var(--accent-amber);
+    border: 1px solid rgba(210, 153, 34, 0.3);
+  }
+  .badge-aggressive {
+    background: rgba(248, 81, 73, 0.15);
+    color: var(--accent-red);
+    border: 1px solid rgba(248, 81, 73, 0.3);
+  }
+  .concurrency-hint-card {
+    margin-top: 0.6rem;
+    padding: 0.65rem 0.8rem;
+    border-radius: 6px;
+    font-size: 0.72rem;
+    line-height: 1.45;
+  }
+  .concurrency-hint-card p {
+    margin: 0;
+  }
+  .hint-header {
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+    font-size: 0.75rem;
+  }
+  .hint-safe {
+    background: rgba(46, 160, 67, 0.08);
+    border: 1px solid rgba(46, 160, 67, 0.25);
+    color: var(--text-main);
+  }
+  .hint-safe .hint-header {
+    color: var(--accent-green);
+  }
+  .hint-optimal {
+    background: rgba(56, 139, 253, 0.08);
+    border: 1px solid rgba(56, 139, 253, 0.25);
+    color: var(--text-main);
+  }
+  .hint-optimal .hint-header {
+    color: var(--accent-blue);
+  }
+  .hint-warn {
+    background: rgba(210, 153, 34, 0.08);
+    border: 1px solid rgba(210, 153, 34, 0.25);
+    color: var(--text-main);
+  }
+  .hint-warn .hint-header {
+    color: var(--accent-amber);
+  }
+  .hint-danger {
+    background: rgba(248, 81, 73, 0.08);
+    border: 1px solid rgba(248, 81, 73, 0.25);
+    color: var(--text-main);
+  }
+  .hint-danger .hint-header {
+    color: var(--accent-red);
   }
   .modal-footer {
     display: flex;

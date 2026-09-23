@@ -111,6 +111,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/gdrive/cookie", s.handleSetGoogleCookie)
 	mux.HandleFunc("POST /api/gdrive/logout", s.handleClearGoogleCookie)
 	mux.HandleFunc("GET /api/fs/browse", s.handleBrowseFS)
+	mux.HandleFunc("POST /api/fs/mkdir", s.handleCreateFolder)
 
 	// Protected Logs endpoints
 	mux.HandleFunc("GET /api/logs", s.handleGetLogs)
@@ -704,6 +705,41 @@ func (s *Server) handleBrowseFS(w http.ResponseWriter, r *http.Request) {
 		Parent:  parent,
 		Drives:  drives,
 		Folders: folders,
+	})
+}
+
+func (s *Server) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Parent string `json:"parent"`
+		Name   string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		http.Error(w, `{"error":"folder name cannot be empty"}`, http.StatusBadRequest)
+		return
+	}
+
+	parent := strings.TrimSpace(req.Parent)
+	if parent == "" {
+		parent = s.manager.TargetFolder
+	}
+
+	targetPath := filepath.Join(parent, name)
+	if err := os.MkdirAll(targetPath, 0755); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to create folder: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "created",
+		"path":   targetPath,
+		"name":   name,
 	})
 }
 
