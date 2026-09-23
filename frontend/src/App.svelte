@@ -1594,16 +1594,18 @@
   // Multi-Selection Batch Actions
   async function startSelected() {
     if (selectedIds.length === 0) return;
-    for (const id of selectedIds) {
-      fetch(`/api/downloads/${id}/start`, { method: 'POST' }).catch(console.error);
+    const toStart = downloads.filter(d => selectedIds.includes(d.id) && (d.status === 'paused' || d.status === 'failed' || d.status === 'cancelled'));
+    for (const item of toStart) {
+      fetch(`/api/downloads/${item.id}/start`, { method: 'POST' }).catch(console.error);
     }
     setTimeout(fetchDownloads, 200);
   }
 
   async function pauseSelected() {
     if (selectedIds.length === 0) return;
-    for (const id of selectedIds) {
-      fetch(`/api/downloads/${id}/pause`, { method: 'POST' }).catch(console.error);
+    const toPause = downloads.filter(d => selectedIds.includes(d.id) && (d.status === 'downloading' || d.status === 'queued' || d.status === 'compressing'));
+    for (const item of toPause) {
+      fetch(`/api/downloads/${item.id}/pause`, { method: 'POST' }).catch(console.error);
     }
     setTimeout(fetchDownloads, 200);
   }
@@ -1624,6 +1626,8 @@
   // Task Control Functions (Single item fallbacks)
   async function startDownload(id) {
     if (!id) return;
+    const item = downloads.find(d => d.id === id);
+    if (item && item.status === 'completed') return;
     try {
       await fetch(`/api/downloads/${id}/start`, { method: 'POST' });
       fetchDownloads();
@@ -1634,6 +1638,8 @@
 
   async function pauseDownload(id) {
     if (!id) return;
+    const item = downloads.find(d => d.id === id);
+    if (item && (item.status === 'completed' || item.status === 'paused')) return;
     try {
       await fetch(`/api/downloads/${id}/pause`, { method: 'POST' });
       fetchDownloads();

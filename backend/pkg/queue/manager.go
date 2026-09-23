@@ -1346,6 +1346,10 @@ func (m *Manager) Pause(id string) error {
 	}
 
 	item.mu.Lock()
+	if item.Status == StatusCompleted || item.Status == StatusPaused || item.Status == StatusMoving {
+		item.mu.Unlock()
+		return nil
+	}
 	item.Status = StatusPaused
 	if item.cancelFunc != nil {
 		item.cancelFunc()
@@ -1379,7 +1383,7 @@ func (m *Manager) Start(id string) error {
 	}
 
 	item.mu.Lock()
-	if item.Status == StatusDownloading || item.Status == StatusQueued || item.Status == StatusCompressing {
+	if item.Status == StatusDownloading || item.Status == StatusQueued || item.Status == StatusCompressing || item.Status == StatusMoving || item.Status == StatusCompleted {
 		item.mu.Unlock()
 		return nil
 	}
