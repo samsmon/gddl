@@ -1,4 +1,4 @@
-.desktop-app { display: flex; flex-direction: column; width: 100vw; height: 100vh; background: var(--app-bg); }
+.app-layout, .desktop-app { display: flex; flex-direction: column; width: 100vw; height: 100vh; max-height: 100vh; overflow: hidden; background: var(--app-bg); }
 /* Toolbar */
 .toolbar { height: 42px; background: var(--toolbar-bg); border-bottom: 1px solid var(--border-color); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15); display: flex; align-items: center; padding: 0 0.75rem; gap: 0.4rem; flex-shrink: 0; z-index: 20; }
 .toolbar-brand { display: flex; align-items: center; gap: 0.45rem; margin-right: 0.4rem; padding-right: 0.6rem; border-right: 1px solid var(--border-color); }
@@ -21,7 +21,7 @@
 .toolbar-search input { border: none; background: transparent; padding: 0.15rem; font-size: 0.8rem; width: 150px; }
 .clear-search-btn { background: transparent; color: var(--text-muted); font-size: 0.75rem; }
 /* Workspace */
-.workspace { flex: 1; display: flex; overflow: hidden; }
+.main-body, .workspace { flex: 1 1 0; display: flex; overflow: hidden; min-height: 0; }
 /* Left Sidebar */
 .sidebar { width: 190px; background: var(--sidebar-bg); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; flex-shrink: 0; }
 .sidebar-header { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; color: var(--text-dim); padding: 0.65rem 0.85rem 0.25rem; letter-spacing: 0.05em; }

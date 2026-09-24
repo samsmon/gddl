@@ -36,7 +36,7 @@
   <title>Google Drive &amp; Discord Direct Downloader</title>
 </svelte:head>
 
-{#if app.authRequired && !app.isAuthenticated}
+{#if !app.authChecked || (app.authEnabled && !app.isAuthenticated)}
   <LoginScreen />
 {:else}
   <div class="app-layout">
