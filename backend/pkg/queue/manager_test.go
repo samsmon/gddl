@@ -271,5 +271,3 @@ func TestPauseAllAndResumeAll(t *testing.T) {
 	default:
 	}
 }
-
-
