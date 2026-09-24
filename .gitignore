@@ -2,6 +2,8 @@
 backend/downloads.json
 backend/downloads.json.tmp
 backend/config.json
+downloads.json
+config.json
 *.tmp_gdrive_*
 .tmp_*
 

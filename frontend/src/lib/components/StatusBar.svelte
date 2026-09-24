@@ -11,6 +11,18 @@
       {#if app.hasLogin}
         <span class="sb-badge-auth">Google Session Active</span>
       {/if}
+      {#if app.hasUpdate}
+        <span class="sb-divider">|</span>
+        <button
+          type="button"
+          onclick={() => app.checkForUpdates()}
+          style="background: rgba(56, 139, 253, 0.18); border: 1px solid rgba(56, 139, 253, 0.4); color: var(--accent-blue); font-size: 11px; padding: 1px 7px; border-radius: 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; font-weight: 600;"
+          title="New update available! Click to view update details and pull instructions."
+        >
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          <span>Update Available</span>
+        </button>
+      {/if}
       {#if app.bulkAddingStatus}
         <span class="sb-divider">|</span>
         <span style="color: var(--accent-blue); display: inline-flex; align-items: center; gap: 4px;">

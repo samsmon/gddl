@@ -25,6 +25,9 @@ export function attachActionsPart4(app) {
     app.fetchOAuthStatus();
     app.fetchWarpStatus();
     app.setupSSE();
+    setTimeout(() => {
+      app.checkForUpdates(true);
+    }, 2500);
     if (!app.pollInterval) {
       app.pollInterval = setInterval(() => {
         app.fetchDownloads();

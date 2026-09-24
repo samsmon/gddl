@@ -219,13 +219,67 @@ export function attachActionsPart6(app) {
     } catch (e) {}
   }
 
-  app.checkForUpdates = function() {
-    app.showUpdateModal = true;
+  app.checkForUpdates = async function(silent = false) {
+    if (!silent) {
+      app.showUpdateModal = true;
+    }
     app.updateChecking = true;
-    app.updateStatus = 'Connecting to release server...';
-    setTimeout(() => {
+    app.updateStatus = 'Checking GitHub repository for latest commits...';
+    app.updateError = '';
+
+    try {
+      const res = await fetch('/api/system/check-update');
+      if (res.ok) {
+        const data = await res.json();
+        app.updateInfo = data;
+        app.hasUpdate = !!data.update_available;
+        app.updateStatus = data.update_available ? 'New update available!' : 'You are on the latest version.';
+      } else {
+        const ghRes = await fetch('https://raw.githubusercontent.com/samsmon/gddl/main/version.json');
+        if (ghRes.ok) {
+          const remote = await ghRes.json();
+          const curCommit = app.updateInfo?.current_commit || '1e382c5';
+          const updateAvail = remote.commit && remote.commit !== curCommit;
+          app.updateInfo = {
+            update_available: updateAvail,
+            current_version: '1.3.0',
+            current_commit: curCommit,
+            latest_version: remote.version || '1.3.0',
+            latest_commit: remote.commit,
+            latest_title: remote.title || remote.message,
+            latest_message: remote.message,
+            changelog: remote.changelog || [],
+            pull_command: 'git pull origin main',
+            rebuild_command: 'npm run build --prefix frontend && go build -o gddl.exe ./backend'
+          };
+          app.hasUpdate = updateAvail;
+        } else {
+          throw new Error('Unable to connect to GitHub release server');
+        }
+      }
+    } catch (e) {
+      app.updateError = 'Failed to check updates: ' + e.message;
+    } finally {
       app.updateChecking = false;
-      app.updateStatus = 'You are running the latest version (v1.2.0 Desktop Persistent Edition).';
-    }, 700);
+    }
+  }
+
+  app.copyUpdateCommand = function() {
+    const cmd = `git pull origin main\ncd frontend && npm run build\ncd ../backend && go build -o ../gddl.exe .`;
+    if (navigator.clipboard && window.isSecureContext && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(cmd).then(() => {
+        app.copiedUpdateCmd = true;
+        setTimeout(() => { app.copiedUpdateCmd = false; }, 2500);
+      }).catch(() => {
+        app.fallbackCopy(cmd);
+        app.copiedUpdateCmd = true;
+        setTimeout(() => { app.copiedUpdateCmd = false; }, 2500);
+      });
+    } else {
+      app.fallbackCopy(cmd);
+      app.copiedUpdateCmd = true;
+      setTimeout(() => { app.copiedUpdateCmd = false; }, 2500);
+    }
   }
 }
+

@@ -46,6 +46,10 @@ export class CoreState {
   showAboutModal = $state(false);
   updateChecking = $state(false);
   updateStatus = $state('');
+  updateInfo = $state(null);
+  updateError = $state('');
+  copiedUpdateCmd = $state(false);
+  hasUpdate = $state(false);
   showLogsModal = $state(false);
   logs = $state([]);
   logFilter = $state('ALL');

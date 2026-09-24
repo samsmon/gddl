@@ -146,6 +146,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/logs", s.handleGetLogs)
 	mux.HandleFunc("DELETE /api/logs", s.handleClearLogs)
 
+	// Version & Update endpoints
+	mux.HandleFunc("GET /api/system/version", s.handleGetVersion)
+	mux.HandleFunc("GET /api/system/check-update", s.handleCheckUpdate)
+
 	// Static files for frontend SPA
 	if s.distPath != "" {
 		if _, err := os.Stat(s.distPath); err == nil {
@@ -202,7 +206,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		if !strings.HasPrefix(path, "/api/") ||
 			path == "/api/auth/status" ||
 			path == "/api/auth/login" ||
-			path == "/api/gdrive/oauth/callback" {
+			path == "/api/gdrive/oauth/callback" ||
+			path == "/api/system/version" ||
+			path == "/api/system/check-update" {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -18,6 +18,10 @@ attachActionsPart6(app);
 attachActionsPart7(app);
 attachActionsPart8(app);
 
+if (typeof window !== 'undefined') {
+  window.app = app;
+}
+
 app.initOnMount = () => {
     // Theme setup
     const savedTheme = localStorage.getItem('gdrive_theme') || 'dark';
