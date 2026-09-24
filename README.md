@@ -28,6 +28,8 @@ A high-performance, self-hosted desktop download manager for Google Drive with a
 - **Google Drive & Discord CDN Support**: Download both Google Drive files/folders and Discord CDN attachments (`cdn.discordapp.com` and `media.discordapp.net`).
 - **Concurrent Discord Downloads with Rate-Limit Protection**: Download multiple Discord files in parallel with adaptive exponential backoff, request jitter pacing, realistic browser headers, and HTTP Range partial-content resumption against Cloudflare HTTP 429 throttling.
 - **Discord Expiry Detection**: Automatically checks the Discord CDN `ex` timestamp and alerts if an attachment link has expired before wasting bandwidth.
+- **Anti-Throttle & Cloudflare WARP Auto-Bypass**: Automatically monitors download transfer speeds and CDN HTTP 429 rate limits. When throttling is detected (e.g., speed drops below threshold for 7s), it seamlessly activates a local Cloudflare WARP SOCKS5 proxy or custom proxy pool, rotates WireGuard keys for fresh egress IPs, and reconnects active chunk streams at the exact byte offset.
+- **Custom SOCKS5/HTTP Proxy Fallback**: For environments where WARP cannot run, users can configure single or comma-separated lists of custom proxies with automatic round-robin pool rotation.
 - **Concurrent Multi-Worker Engine**: Configurable parallel workers (1 to 5) powered by lightweight Go goroutines.
 - **Bypass Virus Scan Prompts**: Automatically extracts Google Drive confirmation tokens for large files (>100MB).
 - **Smart Folder & ZIP Compression**: Paste any public or private Google Drive folder link. Choose between downloading as a subfolder or compressing all folder contents locally into a verified `.zip` archive with real-time compression progress.
@@ -58,6 +60,13 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    # Capabilities & Devices for Cloudflare WARP Local Proxy (Anti-Throttle Watchdog)
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
     environment:
       - PORT=8080
       - HOST=0.0.0.0
@@ -75,7 +84,10 @@ services:
       # 2. Main download directory
       - ./downloads:/downloads
 
-      # 3. Mount External Hard Drives, USB drives, or NAS Shares:
+      # 3. WARP State Persistence (retains client registration & WireGuard credentials)
+      - ./warp:/var/lib/cloudflare-warp
+
+      # 4. Mount External Hard Drives, USB drives, or NAS Shares:
       # Linux / Homelab:
       # - /mnt/storage:/mnt/storage:rw
       # - /media/usb:/media/usb:rw
@@ -92,6 +104,20 @@ Start the service:
 docker compose up -d
 ```
 Access the dashboard at `http://<your-server-ip>:8080`.
+
+#### Cloudflare WARP Setup & Registration Note
+
+The production container includes the official Cloudflare WARP client (`warp-svc` daemon and `warp-cli`).
+1. **Initial Registration**: The container automatically registers a free consumer WARP client on first launch (`warp-cli registration new` / `register`).
+2. **Docker Capabilities**:
+   - `cap_add: [NET_ADMIN]` and `devices: [/dev/net/tun:/dev/net/tun]` are required for `warp-svc` to configure network tunnels.
+   - If running inside an **unprivileged LXC container** (e.g. Proxmox VE), ensure `/dev/net/tun` is passed through and `nesting=1,keyctl=1` is enabled on the LXC host (`lxc.mount.entry: /dev/net dev/net none bind,create=dir`).
+3. **Teams / Zero Trust Token (Optional)**:
+   If you have a Cloudflare Zero Trust organization, you can enroll the container by executing inside the container:
+   ```bash
+   docker exec -it gdrive-downloader warp-cli teams-enroll <your-team-name>
+   ```
+4. **Fallback Mode**: If WARP cannot be given `NET_ADMIN` privileges in your environment, the built-in **Custom Proxy Pool** feature (in Settings -> Anti-Throttle) works out of the box without any special capabilities.
 
 ---
 

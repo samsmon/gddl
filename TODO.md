@@ -28,12 +28,22 @@
 - Replaced 60-second HTTP client body timeout with indefinite streaming client (`Timeout: 0`) in `bypass.go`, eliminating `context deadline exceeded` errors on long downloads.
 - Added comprehensive logger calls (`logger.Errorf`) for single-file download failures in `queue/manager.go` to ensure all errors appear in real-time UI logs.
 
+### 5. 🛡️ Anti-Throttle Watchdog & Cloudflare WARP Local Proxy
+- **Implemented:** Automatic bandwidth throttling watchdog and IP rotation system (`pkg/warp/controller.go`).
+- **Capabilities:**
+  - Detects CDN-level throttling (speed dropping below configurable threshold, e.g. < 5 MB/s for 7s) or HTTP 429 rate limit responses.
+  - Automatically activates local Cloudflare WARP SOCKS5 proxy on `127.0.0.1:40000` (or user-defined port).
+  - Automatically rotates WireGuard tunnel keys (`warp-cli tunnel rotate-keys`) to acquire a fresh egress IP without restarting downloads.
+  - Seamlessly rebinds existing active chunk streams at the exact byte offset using zero-interruption transport epoch flushing.
+  - Full fallback support for manual custom HTTP/SOCKS5 proxy pools with round-robin rotation.
+  - Production runtime migrated to `debian:bookworm-slim` with official `cloudflare-warp` package, background `warp-svc` lifecycle management via `docker-entrypoint.sh`, and auto-registration.
+  - Required Docker capabilities documented: `cap_add: [NET_ADMIN]`, `/dev/net/tun` device, and `/var/lib/cloudflare-warp` state volume.
+
 ---
 
 ## 📋 Backlog / Next Ideas
 - [ ] Multi-thread speed graphs / chunk visualization widget in detail drawer.
 - [ ] Auto-refresh token health indicator in status bar.
-- [ ] Optional proxy / SOCKS5 support for segmented streams.
 
 ---
 

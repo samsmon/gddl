@@ -10,6 +10,13 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    # Required for Cloudflare WARP daemon (warp-svc) network interface & local SOCKS5 proxy
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
     environment:
       - PORT=8080
       - HOST=0.0.0.0
@@ -27,7 +34,10 @@ services:
       # 2. Primary download folder
       - ./downloads:/downloads
 
-      # 3. External Hard Drives, USB drives, or NAS Shares:
+      # 3. Cloudflare WARP state persistence (preserves registration between container recreates)
+      - ./warp:/var/lib/cloudflare-warp
+
+      # 4. External Hard Drives, USB drives, or NAS Shares:
       # Linux / Ubuntu / Debian / Homelab:
       # - /mnt/storage:/mnt/storage:rw
       # - /media/external:/media/external:rw

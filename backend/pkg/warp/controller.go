@@ -447,12 +447,25 @@ func (c *Controller) TriggerAutoBypassOrRotate(reason string, forceImmediate boo
 }
 
 func (c *Controller) ensureWarpProxyConnected(port int) error {
-	// Configure proxy mode and port
+	// 1. Ensure client is registered with Cloudflare WARP service
+	// In newer warp-cli versions, registration is under "registration new" or "register"
+	regStatus, _ := c.runWarpCmd("registration", "show")
+	if strings.Contains(strings.ToLower(regStatus), "missing") || strings.Contains(strings.ToLower(regStatus), "error") || strings.Contains(strings.ToLower(regStatus), "not registered") {
+		_, _ = c.runWarpCmd("registration", "new")
+		_, _ = c.runWarpCmd("register")
+	}
+
+	// 2. Configure proxy mode and port
 	_, _ = c.runWarpCmd("mode", "proxy")
 	_, _ = c.runWarpCmd("proxy", "port", fmt.Sprintf("%d", port))
 
 	if _, err := c.runWarpCmd("connect"); err != nil {
-		return fmt.Errorf("warp-cli connect failed: %w", err)
+		// Attempt registering if connect failed due to missing registration
+		_, _ = c.runWarpCmd("registration", "new")
+		_, _ = c.runWarpCmd("register")
+		if _, err2 := c.runWarpCmd("connect"); err2 != nil {
+			return fmt.Errorf("warp-cli connect failed: %w", err)
+		}
 	}
 
 	// Wait up to 6 seconds for local SOCKS5 port to accept connections
