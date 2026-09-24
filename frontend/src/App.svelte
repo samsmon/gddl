@@ -479,13 +479,14 @@
     }
   }
 
-  async function toggleWarpProxyMode(enable) {
+  async function toggleWarpProxyMode() {
     isRotatingWarp = true;
+    const targetState = !warpStatus.proxy_active;
     try {
       const res = await fetch('/api/warp/toggle', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ proxy_active: enable })
+        body: JSON.stringify({ proxy_active: targetState })
       });
       if (res.ok) {
         warpStatus = await res.json();
