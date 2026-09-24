@@ -107,6 +107,7 @@ type CookieExhaustedNotifier func(cookieID string)
 
 type Downloader struct {
 	client                  *http.Client
+	transport               *http.Transport
 	chunkedDownloader       *ChunkedDownloader
 	cookieLock              sync.RWMutex
 	googleCookie            string
@@ -168,9 +169,20 @@ func NewDownloader() (*Downloader, error) {
 
 	return &Downloader{
 		client:            client,
+		transport:         transport,
 		chunkedDownloader: NewChunkedDownloader(client),
 		chunksPerDownload: 4,
 	}, nil
+}
+
+// BindProxyController connects this downloader and its chunked downloader to the WARP/Proxy controller.
+func (d *Downloader) BindProxyController(registerTransport func(*http.Transport), epochProvider func() uint64, onRateLimit func(string)) {
+	if registerTransport != nil {
+		registerTransport(d.transport)
+		registerTransport(d.chunkedDownloader.Transport())
+	}
+	d.chunkedDownloader.SetEpochProvider(epochProvider)
+	d.chunkedDownloader.SetRateLimitCallback(onRateLimit)
 }
 
 func (d *Downloader) populateCookieJar(cookieStr string) {

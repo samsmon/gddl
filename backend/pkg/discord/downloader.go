@@ -31,11 +31,18 @@ type progressReader struct {
 	lastDownloaded int64
 	lastReport     time.Time
 	onProgress     ProgressCallback
+	startEpoch     uint64
+	epochProvider  func() uint64
 }
+
+var errProxyRotated = fmt.Errorf("proxy_rotated")
 
 func (pr *progressReader) Read(p []byte) (int, error) {
 	if err := pr.ctx.Err(); err != nil {
 		return 0, err
+	}
+	if pr.startEpoch > 0 && pr.epochProvider != nil && pr.epochProvider() != pr.startEpoch {
+		return 0, errProxyRotated
 	}
 
 	n, err := pr.reader.Read(p)
@@ -69,8 +76,11 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 
 type Downloader struct {
 	client            *http.Client
+	transport         *http.Transport
 	chunkedDownloader *chunked.Downloader
 	chunksPerDownload int
+	epochProvider     func() uint64
+	onRateLimit       func(reason string)
 	mu                sync.RWMutex
 }
 
@@ -93,8 +103,43 @@ func NewDownloader() *Downloader {
 
 	return &Downloader{
 		client:            client,
+		transport:         transport,
 		chunkedDownloader: chunked.NewDownloader(client),
 		chunksPerDownload: 4,
+	}
+}
+
+// BindProxyController connects this downloader and its chunked downloader to the WARP/Proxy controller.
+func (d *Downloader) BindProxyController(registerTransport func(*http.Transport), epochProvider func() uint64, onRateLimit func(string)) {
+	d.mu.Lock()
+	d.epochProvider = epochProvider
+	d.onRateLimit = onRateLimit
+	d.mu.Unlock()
+
+	if registerTransport != nil {
+		registerTransport(d.transport)
+		registerTransport(d.chunkedDownloader.Transport())
+	}
+	d.chunkedDownloader.SetEpochProvider(epochProvider)
+	d.chunkedDownloader.SetRateLimitCallback(onRateLimit)
+}
+
+func (d *Downloader) getEpoch() uint64 {
+	d.mu.RLock()
+	fn := d.epochProvider
+	d.mu.RUnlock()
+	if fn != nil {
+		return fn()
+	}
+	return 0
+}
+
+func (d *Downloader) notifyRateLimit(reason string) {
+	d.mu.RLock()
+	fn := d.onRateLimit
+	d.mu.RUnlock()
+	if fn != nil {
+		go fn(reason)
 	}
 }
 
@@ -405,6 +450,7 @@ func (d *Downloader) Download(
 		// Check rate limit HTTP 429
 		if resp.StatusCode == http.StatusTooManyRequests {
 			resp.Body.Close()
+			d.notifyRateLimit(fmt.Sprintf("Discord CDN HTTP 429 for '%s'", filename))
 			retryAfterSec := 5
 			if ra := resp.Header.Get("Retry-After"); ra != "" {
 				if s, err := strconv.Atoi(ra); err == nil && s > 0 {
@@ -504,6 +550,8 @@ func (d *Downloader) Download(
 			lastDownloaded: existingBytes,
 			lastReport:     time.Now(),
 			onProgress:     onProgress,
+			startEpoch:     d.getEpoch(),
+			epochProvider:  d.getEpoch,
 		}
 
 		buf := make([]byte, 1024*1024)
@@ -517,6 +565,12 @@ func (d *Downloader) Download(
 			}
 			if ctx.Err() != nil {
 				return filename, existingBytes, ctx.Err()
+			}
+			if copyErr == errProxyRotated {
+				logger.Infof("Discord", "Switching download '%s' to newly rotated WARP/Proxy IP at byte %d...", filename, existingBytes)
+				attempt--
+				backoff = time.Second
+				continue
 			}
 			logger.Warnf("Discord", "Network error during transfer of '%s': %v. Retrying in %v...", filename, copyErr, backoff)
 			time.Sleep(backoff)

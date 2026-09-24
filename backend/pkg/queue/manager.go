@@ -15,6 +15,7 @@ import (
 	"gdrive-downloader/pkg/discord"
 	"gdrive-downloader/pkg/gdrive"
 	"gdrive-downloader/pkg/logger"
+	"gdrive-downloader/pkg/warp"
 )
 
 type DownloadStatus string
@@ -130,15 +131,16 @@ func (it *DownloadItem) Snapshot() DownloadItem {
 }
 
 type Manager struct {
-	mu             sync.RWMutex
-	items          map[string]*DownloadItem
-	order          []string
-	queueChan      chan *DownloadItem
-	subscribers    map[chan []DownloadItem]bool
-	subMu          sync.RWMutex
-	notifyChan     chan struct{}
+	mu                sync.RWMutex
+	items             map[string]*DownloadItem
+	order             []string
+	queueChan         chan *DownloadItem
+	subscribers       map[chan []DownloadItem]bool
+	subMu             sync.RWMutex
+	notifyChan        chan struct{}
 	downloader        *gdrive.Downloader
 	discordDownloader *discord.Downloader
+	warpController    *warp.Controller
 	MaxConcurrency    int
 	TargetFolder      string
 	dataFile          string
@@ -182,8 +184,111 @@ func NewManager(defaultFolder string, concurrency int, dataFile ...string) (*Man
 	}
 
 	go m.broadcasterLoop()
+	go m.speedWatchdogLoop()
 
 	return m, nil
+}
+
+// SetWarpController attaches the WARP/Proxy controller to the manager and binds both GDrive and Discord downloaders.
+func (m *Manager) SetWarpController(wc *warp.Controller) {
+	m.mu.Lock()
+	m.warpController = wc
+	m.mu.Unlock()
+
+	if wc == nil {
+		return
+	}
+
+	onRateLimit := func(reason string) {
+		if wc.IsAutoEnabled() {
+			_, _ = wc.TriggerAutoBypassOrRotate(reason, false)
+			m.triggerBroadcast()
+		}
+	}
+
+	m.discordDownloader.BindProxyController(wc.RegisterTransport, wc.RotationEpoch, onRateLimit)
+	m.downloader.BindProxyController(wc.RegisterTransport, wc.RotationEpoch, onRateLimit)
+}
+
+// WarpController returns the active WARP/Proxy controller.
+func (m *Manager) WarpController() *warp.Controller {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.warpController
+}
+
+// speedWatchdogLoop continuously monitors total active download speed every second.
+// If active transfers stay below the configured minimum speed threshold for 7 consecutive seconds,
+// it automatically activates or rotates the WARP SOCKS5 proxy / custom proxy pool.
+func (m *Manager) speedWatchdogLoop() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	lowSpeedSec := 0
+
+	for range ticker.C {
+		wc := m.WarpController()
+		if wc == nil || !wc.IsAutoEnabled() {
+			if lowSpeedSec > 0 {
+				lowSpeedSec = 0
+				if wc != nil {
+					wc.SetLowSpeedDuration(0)
+				}
+			}
+			continue
+		}
+
+		m.mu.RLock()
+		var totalSpeed int64
+		var matureDownloadingCount int
+		now := time.Now()
+
+		for _, it := range m.items {
+			it.mu.RLock()
+			if it.Status == StatusDownloading {
+				totalSpeed += it.Speed
+				// Give newly started downloads a 4-second grace period to establish TCP & ramp up
+				if now.Sub(it.LastTryAt) >= 4*time.Second {
+					matureDownloadingCount++
+				}
+			}
+			it.mu.RUnlock()
+		}
+		m.mu.RUnlock()
+
+		if matureDownloadingCount == 0 {
+			if lowSpeedSec > 0 {
+				lowSpeedSec = 0
+				wc.SetLowSpeedDuration(0)
+			}
+			continue
+		}
+
+		minBytes := wc.MinSpeedBytesPerSec()
+		if totalSpeed < minBytes {
+			lowSpeedSec++
+			wc.SetLowSpeedDuration(lowSpeedSec)
+
+			if lowSpeedSec >= 7 {
+				speedMB := float64(totalSpeed) / (1024.0 * 1024.0)
+				minMB := float64(minBytes) / (1024.0 * 1024.0)
+				reason := fmt.Sprintf("Speed %.2f MB/s < %.1f MB/s threshold for %ds", speedMB, minMB, lowSpeedSec)
+				lowSpeedSec = 0
+				wc.SetLowSpeedDuration(0)
+
+				go func(r string) {
+					if rotated, _ := wc.TriggerAutoBypassOrRotate(r, false); rotated {
+						m.triggerBroadcast()
+					}
+				}(reason)
+			}
+		} else {
+			if lowSpeedSec > 0 {
+				lowSpeedSec = 0
+				wc.SetLowSpeedDuration(0)
+			}
+		}
+	}
 }
 
 func (m *Manager) saveToDiskLocked() {

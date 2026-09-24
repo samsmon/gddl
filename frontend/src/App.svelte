@@ -427,6 +427,80 @@
     return `${day}/${mon}/${yr} ${hr}:${min}`;
   }
 
+  // Cloudflare WARP & Anti-Throttle Auto-Bypass state
+  let autoWarpEnabled = $state(true);
+  let autoWarpMinSpeedMB = $state(5);
+  let warpProxyPort = $state(40000);
+  let customProxyURL = $state('');
+  let isRotatingWarp = $state(false);
+  let warpStatus = $state({
+    installed: false,
+    binary_path: '',
+    auto_enabled: true,
+    proxy_active: false,
+    warp_connected: false,
+    is_rotating: false,
+    min_speed_mb: 5.0,
+    proxy_port: 40000,
+    custom_proxy_url: '',
+    active_proxy_url: '',
+    rotation_count: 0,
+    low_speed_duration_sec: 0,
+    last_reason: ''
+  });
+
+  async function fetchWarpStatus() {
+    if (authEnabled && !isAuthenticated) return;
+    try {
+      const res = await fetch('/api/warp/status');
+      if (res.ok) {
+        warpStatus = await res.json();
+      }
+    } catch (e) {}
+  }
+
+  async function rotateWarpIP() {
+    if (isRotatingWarp || warpStatus.is_rotating) return;
+    isRotatingWarp = true;
+    try {
+      const res = await fetch('/api/warp/rotate', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.status) warpStatus = data.status;
+      } else {
+        const err = await res.json().catch(() => ({ error: 'Failed to rotate IP' }));
+        alert('WARP / Proxy Error: ' + (err.error || 'Failed to rotate'));
+      }
+    } catch (e) {
+      alert('Failed to rotate WARP IP: ' + e.message);
+    } finally {
+      isRotatingWarp = false;
+      fetchWarpStatus();
+    }
+  }
+
+  async function toggleWarpProxyMode(enable) {
+    isRotatingWarp = true;
+    try {
+      const res = await fetch('/api/warp/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proxy_active: enable })
+      });
+      if (res.ok) {
+        warpStatus = await res.json();
+      } else {
+        const err = await res.json().catch(() => ({ error: 'Failed to toggle WARP' }));
+        alert('WARP Error: ' + (err.error || 'Failed'));
+      }
+    } catch (e) {
+      alert('WARP Error: ' + e.message);
+    } finally {
+      isRotatingWarp = false;
+      fetchWarpStatus();
+    }
+  }
+
   async function loadConfig() {
     try {
       const res = await fetch('/api/config');
@@ -438,6 +512,10 @@
         }
         if (cfg.max_concurrency) maxConcurrency = cfg.max_concurrency;
         if (cfg.chunks_per_download) chunksPerDownload = cfg.chunks_per_download;
+        if (typeof cfg.auto_warp_enabled === 'boolean') autoWarpEnabled = cfg.auto_warp_enabled;
+        if (cfg.auto_warp_min_speed_mb) autoWarpMinSpeedMB = cfg.auto_warp_min_speed_mb;
+        if (cfg.warp_proxy_port) warpProxyPort = cfg.warp_proxy_port;
+        if (typeof cfg.custom_proxy_url === 'string') customProxyURL = cfg.custom_proxy_url;
         hasLogin = !!cfg.has_login;
         if (typeof cfg.auth_enabled === 'boolean') {
           authEnabled = cfg.auth_enabled;
@@ -461,10 +539,15 @@
         body: JSON.stringify({
           download_folder: defaultFolder,
           max_concurrency: parseInt(maxConcurrency, 10) || 2,
-          chunks_per_download: parseInt(chunksPerDownload, 10) || 4
+          chunks_per_download: parseInt(chunksPerDownload, 10) || 4,
+          auto_warp_enabled: !!autoWarpEnabled,
+          auto_warp_min_speed_mb: parseFloat(autoWarpMinSpeedMB) || 5.0,
+          warp_proxy_port: parseInt(warpProxyPort, 10) || 40000,
+          custom_proxy_url: customProxyURL.trim()
         })
       });
       addTargetFolder = defaultFolder;
+      fetchWarpStatus();
       showSettingsModal = false;
     } catch (e) {
       alert('Error saving settings: ' + e.message);
@@ -1089,10 +1172,12 @@
     fetchLogs();
     fetchGoogleCookies();
     fetchOAuthStatus();
+    fetchWarpStatus();
     setupSSE();
     if (!pollInterval) {
       pollInterval = setInterval(() => {
         fetchDownloads();
+        fetchWarpStatus();
         if (showLogsModal) {
           fetchLogs();
         }
@@ -2464,6 +2549,38 @@
           <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
         </svg>
         <span>Refresh Discord</span>
+      </button>
+
+      <!-- Cloudflare WARP / Anti-Throttle Status & Quick Rotate -->
+      <button
+        class="tb-btn {warpStatus.proxy_active ? 'active-auth' : ''}"
+        onclick={toggleWarpProxyMode}
+        disabled={isRotatingWarp}
+        title={warpStatus.proxy_active
+          ? `WARP Proxy Active (${warpStatus.active_proxy || '127.0.0.1:' + warpStatus.proxy_port}) | Rotations: ${warpStatus.rotation_count} | Click to switch back to Direct IP`
+          : `Anti-Throttle Watchdog (${autoWarpEnabled ? 'Auto < ' + autoWarpMinSpeedMB + ' MB/s' : 'Manual'}) | Click to enable WARP Proxy immediately`}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+        </svg>
+        <span>{warpStatus.proxy_active ? `WARP #${warpStatus.rotation_count || 1}` : (autoWarpEnabled ? 'WARP: Auto' : 'WARP: Off')}</span>
+        {#if warpStatus.proxy_active}
+          <span class="auth-dot"></span>
+        {/if}
+      </button>
+
+      <button
+        class="tb-btn"
+        onclick={rotateWarpIP}
+        disabled={isRotatingWarp}
+        title="Force rotate Cloudflare WARP tunnel keys / Proxy IP and immediately reconnect throttled download streams"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="23 4 23 10 17 10"></polyline>
+          <polyline points="1 20 1 14 7 14"></polyline>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+        </svg>
+        <span>{isRotatingWarp ? 'Rotating...' : 'Rotate IP'}</span>
       </button>
 
       <!-- Options -->
@@ -4243,6 +4360,72 @@
             <div class="concurrency-hint-card hint-optimal" style="margin-top: 8px;">
               <div class="hint-header">Google Drive 10 MB/s Speed Cap Bypass</div>
               <p>Google Drive throttles individual TCP streams to ~10 MB/s. Dividing files larger than 10 MB into multiple parallel byte range segments bypasses this single-stream bottleneck (just like Internet Download Manager) without triggering Google quota restrictions.</p>
+            </div>
+          </div>
+
+          <!-- Divider -->
+          <div style="border-top: 1px solid var(--border-color); margin: 1.25rem 0 1rem 0;"></div>
+
+          <!-- Anti-Throttle & Cloudflare WARP Auto-Bypass Section -->
+          <div class="form-group">
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+              <span class="form-title" style="font-weight: 600; color: var(--accent-blue);">Anti-Throttle &amp; Cloudflare WARP Auto-Bypass</span>
+              {#if warpStatus.proxy_active}
+                <span class="concurrency-badge badge-optimal">Proxy Active (Rotations: {warpStatus.rotation_count})</span>
+              {:else if autoWarpEnabled}
+                <span class="concurrency-badge badge-balanced">Watchdog Armed (&lt; {autoWarpMinSpeedMB} MB/s)</span>
+              {:else}
+                <span class="concurrency-badge badge-safe">Direct Connection</span>
+              {/if}
+            </div>
+            <span class="form-hint" style="margin-bottom: 0.75rem;">
+              Automatically detects CDN IP bandwidth throttling (e.g. speed dropping to 50 KB/s), enables Cloudflare WARP Local SOCKS5 Proxy (or custom proxy pool), rotates WireGuard keys when a proxy IP is also throttled, and seamlessly reconnects active chunk streams at the exact byte offset.
+            </span>
+
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 0.75rem;">
+              <input type="checkbox" bind:checked={autoWarpEnabled} style="width: auto;" />
+              <span style="font-weight: 500;">Enable Automatic Speed Watchdog &amp; Proxy Rotation</span>
+            </label>
+
+            <div style="background: var(--table-row-alt); padding: 12px; border-radius: 6px; border: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 10px;">
+              <div style="display: grid; grid-template-columns: 210px 1fr; gap: 8px; align-items: center;">
+                <span style="font-size: 12px; color: var(--text-muted);">Min Speed Trigger (MB/s):</span>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <input type="number" step="0.5" min="0.5" max="100" bind:value={autoWarpMinSpeedMB} style="padding: 4px 8px; width: 90px;" />
+                  <span class="form-hint" style="margin: 0;">Triggers bypass/rotate if total speed stays below this for 7s.</span>
+                </div>
+
+                <span style="font-size: 12px; color: var(--text-muted);">WARP Local SOCKS5 Port:</span>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <input type="number" min="1024" max="65535" bind:value={warpProxyPort} style="padding: 4px 8px; width: 90px;" />
+                  <span class="form-hint" style="margin: 0;">{warpStatus.installed ? `warp-cli detected (${warpStatus.warp_state || 'Ready'})` : 'warp-cli not detected (uses Custom Proxy if set)'}</span>
+                </div>
+
+                <span style="font-size: 12px; color: var(--text-muted);">Custom Proxy Pool (Optional):</span>
+                <input
+                  type="text"
+                  bind:value={customProxyURL}
+                  placeholder="socks5://127.0.0.1:40000, http://user:pass@ip:port (comma-separated)"
+                  style="padding: 4px 8px; font-family: monospace; font-size: 11px;"
+                />
+              </div>
+
+              <div style="display: flex; align-items: center; justify-content: space-between; padding-top: 6px; border-top: 1px solid var(--border-subtle); font-size: 11px; color: var(--text-muted);">
+                <span>
+                  Current Route: <strong style="color: var(--text-main);">{warpStatus.proxy_active ? (warpStatus.active_proxy || `socks5://127.0.0.1:${warpProxyPort}`) : 'Direct Connection'}</strong>
+                  {#if warpStatus.last_trigger_reason}
+                    &bull; Last Event: <em>{warpStatus.last_trigger_reason}</em>
+                  {/if}
+                </span>
+                <div style="display: flex; gap: 6px;">
+                  <button type="button" class="btn-secondary" style="padding: 3px 10px; font-size: 11px;" onclick={toggleWarpProxyMode} disabled={isRotatingWarp}>
+                    {warpStatus.proxy_active ? 'Disable Proxy' : 'Enable Proxy Now'}
+                  </button>
+                  <button type="button" class="btn-primary" style="padding: 3px 10px; font-size: 11px;" onclick={rotateWarpIP} disabled={isRotatingWarp}>
+                    {isRotatingWarp ? 'Rotating IP...' : 'Rotate IP Now'}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 

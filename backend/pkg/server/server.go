@@ -20,6 +20,7 @@ import (
 	"gdrive-downloader/pkg/gdrive"
 	"gdrive-downloader/pkg/logger"
 	"gdrive-downloader/pkg/queue"
+	"gdrive-downloader/pkg/warp"
 )
 
 type Server struct {
@@ -27,6 +28,7 @@ type Server struct {
 	authMgr   *auth.Manager
 	oauthMgr  *gdrive.OAuthManager
 	bypassMgr *gdrive.BypassManager
+	warpCtrl  *warp.Controller
 	distPath  string
 }
 
@@ -42,13 +44,17 @@ type ResolveFolderRequest struct {
 }
 
 type ConfigData struct {
-	DownloadFolder    string `json:"download_folder"`
-	MaxConcurrency    int    `json:"max_concurrency"`
-	ChunksPerDownload int    `json:"chunks_per_download"`
-	GoogleCookie      string `json:"google_cookie,omitempty"`
-	HasLogin          bool   `json:"has_login"`
-	AuthEnabled       bool   `json:"auth_enabled"`
-	Username          string `json:"username"`
+	DownloadFolder     string  `json:"download_folder"`
+	MaxConcurrency     int     `json:"max_concurrency"`
+	ChunksPerDownload  int     `json:"chunks_per_download"`
+	GoogleCookie       string  `json:"google_cookie,omitempty"`
+	HasLogin           bool    `json:"has_login"`
+	AuthEnabled        bool    `json:"auth_enabled"`
+	Username           string  `json:"username"`
+	AutoWarpEnabled    *bool   `json:"auto_warp_enabled,omitempty"`
+	AutoWarpMinSpeedMB float64 `json:"auto_warp_min_speed_mb,omitempty"`
+	WarpProxyPort      int     `json:"warp_proxy_port,omitempty"`
+	CustomProxyURL     string  `json:"custom_proxy_url,omitempty"`
 }
 
 type FolderItem struct {
@@ -103,11 +109,17 @@ func NewServer(manager *queue.Manager, authMgr *auth.Manager, distPath string) *
 	bypassMgr.SetChunksPerDownload(chunks)
 	manager.DiscordDownloader().SetChunksPerDownload(chunks)
 
+	// Initialize Cloudflare WARP & Anti-Throttle controller
+	autoWarp, minSpeedMB, warpPort, customProxy := authMgr.GetWarpSettings()
+	warpCtrl := warp.NewController(autoWarp, minSpeedMB, warpPort, customProxy)
+	manager.SetWarpController(warpCtrl)
+
 	s := &Server{
 		manager:   manager,
 		authMgr:   authMgr,
 		oauthMgr:  oauthMgr,
 		bypassMgr: bypassMgr,
+		warpCtrl:  warpCtrl,
 		distPath:  distPath,
 	}
 
@@ -159,6 +171,12 @@ func (s *Server) Routes() http.Handler {
 	// Discord specific batch management endpoints
 	mux.HandleFunc("GET /api/discord/unfinished", s.handleGetUnfinishedDiscordItems)
 	mux.HandleFunc("POST /api/discord/refresh-urls", s.handleRefreshDiscordURLs)
+
+	// Cloudflare WARP & Anti-Throttle Auto-Bypass endpoints
+	mux.HandleFunc("GET /api/warp/status", s.handleGetWarpStatus)
+	mux.HandleFunc("POST /api/warp/toggle", s.handleToggleWarpProxy)
+	mux.HandleFunc("POST /api/warp/rotate", s.handleRotateWarpIP)
+	mux.HandleFunc("POST /api/warp/config", s.handleSaveWarpConfig)
 
 	// Protected Config & File system
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
@@ -792,13 +810,18 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	cookie := s.manager.Downloader().GetGoogleCookie()
 	cfg := s.authMgr.GetConfig()
+	autoWarp, minSpeedMB, warpPort, customProxy := s.authMgr.GetWarpSettings()
 	res := ConfigData{
-		DownloadFolder:    s.manager.TargetFolder,
-		MaxConcurrency:    s.manager.MaxConcurrency,
-		ChunksPerDownload: s.authMgr.GetChunksPerDownload(),
-		HasLogin:          cookie != "",
-		AuthEnabled:       cfg.AuthEnabled,
-		Username:          cfg.Username,
+		DownloadFolder:     s.manager.TargetFolder,
+		MaxConcurrency:     s.manager.MaxConcurrency,
+		ChunksPerDownload:  s.authMgr.GetChunksPerDownload(),
+		HasLogin:           cookie != "",
+		AuthEnabled:        cfg.AuthEnabled,
+		Username:           cfg.Username,
+		AutoWarpEnabled:    &autoWarp,
+		AutoWarpMinSpeedMB: minSpeedMB,
+		WarpProxyPort:      warpPort,
+		CustomProxyURL:     customProxy,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
@@ -826,11 +849,110 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		s.manager.Downloader().SetGoogleCookie(cfg.GoogleCookie)
 	}
 
+	// Update WARP / Anti-Throttle settings if provided
+	curAuto, curMinSpeed, curPort, curProxy := s.authMgr.GetWarpSettings()
+	if cfg.AutoWarpEnabled != nil {
+		curAuto = *cfg.AutoWarpEnabled
+	}
+	if cfg.AutoWarpMinSpeedMB > 0 {
+		curMinSpeed = cfg.AutoWarpMinSpeedMB
+	}
+	if cfg.WarpProxyPort > 0 {
+		curPort = cfg.WarpProxyPort
+	}
+	curProxy = cfg.CustomProxyURL
+	_ = s.authMgr.SaveWarpSettings(curAuto, curMinSpeed, curPort, curProxy)
+	if s.warpCtrl != nil {
+		s.warpCtrl.UpdateConfig(curAuto, curMinSpeed, curPort, curProxy)
+	}
+
 	// Persist to disk via authMgr
 	_ = s.authMgr.UpdateConfig(cfg.DownloadFolder, cfg.MaxConcurrency, cfg.ChunksPerDownload, cfg.GoogleCookie)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
+}
+
+func (s *Server) handleGetWarpStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.warpCtrl == nil {
+		json.NewEncoder(w).Encode(warp.Status{})
+		return
+	}
+	json.NewEncoder(w).Encode(s.warpCtrl.GetStatus())
+}
+
+func (s *Server) handleToggleWarpProxy(w http.ResponseWriter, r *http.Request) {
+	if s.warpCtrl == nil {
+		http.Error(w, `{"error":"warp controller unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		ProxyActive *bool `json:"proxy_active"`
+		AutoEnabled *bool `json:"auto_enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.AutoEnabled != nil {
+		_, minSpeed, port, customProxy := s.authMgr.GetWarpSettings()
+		_ = s.authMgr.SaveWarpSettings(*req.AutoEnabled, minSpeed, port, customProxy)
+		s.warpCtrl.UpdateConfig(*req.AutoEnabled, minSpeed, port, customProxy)
+	}
+
+	if req.ProxyActive != nil {
+		if err := s.warpCtrl.SetProxyActive(*req.ProxyActive); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.warpCtrl.GetStatus())
+}
+
+func (s *Server) handleRotateWarpIP(w http.ResponseWriter, r *http.Request) {
+	if s.warpCtrl == nil {
+		http.Error(w, `{"error":"warp controller unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	rotated, err := s.warpCtrl.TriggerAutoBypassOrRotate("Manual IP rotation requested from Web UI", true)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"rotated": rotated,
+		"status":  s.warpCtrl.GetStatus(),
+	})
+}
+
+func (s *Server) handleSaveWarpConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AutoEnabled    bool    `json:"auto_enabled"`
+		MinSpeedMB     float64 `json:"min_speed_mb"`
+		ProxyPort      int     `json:"proxy_port"`
+		CustomProxyURL string  `json:"custom_proxy_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+		return
+	}
+	if req.MinSpeedMB <= 0 {
+		req.MinSpeedMB = 5.0
+	}
+	if req.ProxyPort <= 0 {
+		req.ProxyPort = 40000
+	}
+	_ = s.authMgr.SaveWarpSettings(req.AutoEnabled, req.MinSpeedMB, req.ProxyPort, req.CustomProxyURL)
+	if s.warpCtrl != nil {
+		s.warpCtrl.UpdateConfig(req.AutoEnabled, req.MinSpeedMB, req.ProxyPort, req.CustomProxyURL)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.warpCtrl.GetStatus())
 }
 
 func (s *Server) handleSetGoogleCookie(w http.ResponseWriter, r *http.Request) {

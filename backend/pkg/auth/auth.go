@@ -90,6 +90,10 @@ type Config struct {
 	GoogleOAuthToken        *gdrive.OAuthToken `json:"google_oauth_token,omitempty"`
 	GoogleOAuthEmail        string             `json:"google_oauth_email,omitempty"`
 	AutoBypassQuota         bool               `json:"auto_bypass_quota"`
+	AutoWarpEnabled         *bool              `json:"auto_warp_enabled,omitempty"`
+	AutoWarpMinSpeedMB      float64            `json:"auto_warp_min_speed_mb,omitempty"`
+	WarpProxyPort           int                `json:"warp_proxy_port,omitempty"`
+	CustomProxyURL          string             `json:"custom_proxy_url,omitempty"`
 }
 
 type SessionInfo struct {
@@ -126,6 +130,8 @@ func (m *Manager) loadOrInit(defaultFolder string, defaultConcurrency int) error
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	defaultWarpTrue := true
+
 	data, err := os.ReadFile(m.configPath)
 	if err == nil {
 		var cfg Config
@@ -139,6 +145,15 @@ func (m *Manager) loadOrInit(defaultFolder string, defaultConcurrency int) error
 			}
 			if m.config.ChunksPerDownload <= 0 {
 				m.config.ChunksPerDownload = 4
+			}
+			if m.config.AutoWarpEnabled == nil {
+				m.config.AutoWarpEnabled = &defaultWarpTrue
+			}
+			if m.config.AutoWarpMinSpeedMB <= 0 {
+				m.config.AutoWarpMinSpeedMB = 5.0
+			}
+			if m.config.WarpProxyPort <= 0 {
+				m.config.WarpProxyPort = 40000
 			}
 			if len(m.config.GoogleCookies) == 0 && m.config.GoogleCookie != "" {
 				m.config.GoogleCookies = []CookieEntry{
@@ -156,14 +171,17 @@ func (m *Manager) loadOrInit(defaultFolder string, defaultConcurrency int) error
 	// First time initialization with defaults
 	salt := generateRandomHex(16)
 	m.config = Config{
-		AuthEnabled:       true,
-		Username:          "admin",
-		Salt:              salt,
-		PasswordHash:      hashPassword("adminadmin", salt),
-		DownloadFolder:    defaultFolder,
-		MaxConcurrency:    defaultConcurrency,
-		ChunksPerDownload: 4,
-		AutoBypassQuota:   true,
+		AuthEnabled:        true,
+		Username:           "admin",
+		Salt:               salt,
+		PasswordHash:       hashPassword("adminadmin", salt),
+		DownloadFolder:     defaultFolder,
+		MaxConcurrency:     defaultConcurrency,
+		ChunksPerDownload:  4,
+		AutoBypassQuota:    true,
+		AutoWarpEnabled:    &defaultWarpTrue,
+		AutoWarpMinSpeedMB: 5.0,
+		WarpProxyPort:      40000,
 	}
 
 	return m.saveLocked()
@@ -573,3 +591,39 @@ func generateRandomHex(n int) string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+func (m *Manager) GetWarpSettings() (autoEnabled bool, minSpeedMB float64, proxyPort int, customProxyURL string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	autoEnabled = true
+	if m.config.AutoWarpEnabled != nil {
+		autoEnabled = *m.config.AutoWarpEnabled
+	}
+	minSpeedMB = m.config.AutoWarpMinSpeedMB
+	if minSpeedMB <= 0 {
+		minSpeedMB = 5.0
+	}
+	proxyPort = m.config.WarpProxyPort
+	if proxyPort <= 0 {
+		proxyPort = 40000
+	}
+	customProxyURL = m.config.CustomProxyURL
+	return
+}
+
+func (m *Manager) SaveWarpSettings(autoEnabled bool, minSpeedMB float64, proxyPort int, customProxyURL string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.config.AutoWarpEnabled = &autoEnabled
+	if minSpeedMB > 0 {
+		m.config.AutoWarpMinSpeedMB = minSpeedMB
+	}
+	if proxyPort > 0 {
+		m.config.WarpProxyPort = proxyPort
+	}
+	m.config.CustomProxyURL = strings.TrimSpace(customProxyURL)
+	return m.saveLocked()
+}
+

@@ -48,7 +48,11 @@ type ChunkState struct {
 
 // Downloader manages multi-stream segmented downloads with parallel HTTP Range requests.
 type Downloader struct {
-	client *http.Client
+	mu            sync.RWMutex
+	client        *http.Client
+	transport     *http.Transport
+	epochProvider func() uint64
+	onRateLimit   func(reason string)
 }
 
 // NewDownloader creates a new chunked Downloader with multi-socket HTTP/1.1 transport.
@@ -93,7 +97,46 @@ func NewDownloader(baseClient *http.Client) *Downloader {
 	}
 
 	return &Downloader{
-		client: client,
+		client:    client,
+		transport: transport,
+	}
+}
+
+// Transport returns the underlying HTTP transport for dynamic proxy wiring.
+func (d *Downloader) Transport() *http.Transport {
+	return d.transport
+}
+
+// SetEpochProvider registers a function that returns the current WARP/Proxy rotation epoch.
+func (d *Downloader) SetEpochProvider(fn func() uint64) {
+	d.mu.Lock()
+	d.epochProvider = fn
+	d.mu.Unlock()
+}
+
+// SetRateLimitCallback registers a callback invoked when HTTP 429 is encountered.
+func (d *Downloader) SetRateLimitCallback(fn func(reason string)) {
+	d.mu.Lock()
+	d.onRateLimit = fn
+	d.mu.Unlock()
+}
+
+func (d *Downloader) getEpoch() uint64 {
+	d.mu.RLock()
+	fn := d.epochProvider
+	d.mu.RUnlock()
+	if fn != nil {
+		return fn()
+	}
+	return 0
+}
+
+func (d *Downloader) notifyRateLimit(reason string) {
+	d.mu.RLock()
+	fn := d.onRateLimit
+	d.mu.RUnlock()
+	if fn != nil {
+		go fn(reason)
 	}
 }
 
@@ -434,8 +477,33 @@ func (d *Downloader) downloadSegmentedOnce(
 					return
 				}
 
-				req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
+				startEpoch := d.getEpoch()
+				reqCtx, cancelReq := context.WithCancel(ctx)
+				attemptDone := make(chan struct{})
+				if startEpoch > 0 {
+					go func(expectedEpoch uint64) {
+						ticker := time.NewTicker(400 * time.Millisecond)
+						defer ticker.Stop()
+						for {
+							select {
+							case <-attemptDone:
+								return
+							case <-ctx.Done():
+								return
+							case <-ticker.C:
+								if d.getEpoch() != expectedEpoch {
+									cancelReq()
+									return
+								}
+							}
+						}
+					}(startEpoch)
+				}
+
+				req, err := http.NewRequestWithContext(reqCtx, "GET", downloadURL, nil)
 				if err != nil {
+					close(attemptDone)
+					cancelReq()
 					setErr(err)
 					return
 				}
@@ -450,9 +518,17 @@ func (d *Downloader) downloadSegmentedOnce(
 
 				resp, err := d.client.Do(req)
 				if err != nil {
+					close(attemptDone)
+					cancelReq()
 					if errors.Is(ctx.Err(), context.Canceled) {
 						setErr(ctx.Err())
 						return
+					}
+					if startEpoch > 0 && d.getEpoch() != startEpoch {
+						logger.Infof("Chunked", "Chunk %d reconnecting via rotated WARP/Proxy IP at byte %d...", s.Index, s.Current.Load())
+						attempt--
+						backoff = time.Second
+						continue
 					}
 					if attempt == maxRetries {
 						setErr(fmt.Errorf("chunk %d failed after %d attempts: %w", s.Index, maxRetries, err))
@@ -463,9 +539,13 @@ func (d *Downloader) downloadSegmentedOnce(
 					continue
 				}
 
-				// Handle HTTP 429 Rate Limit with backoff
+				// Handle HTTP 429 Rate Limit with auto-WARP rotation trigger + backoff
 				if resp.StatusCode == http.StatusTooManyRequests {
 					resp.Body.Close()
+					close(attemptDone)
+					cancelReq()
+					d.notifyRateLimit(fmt.Sprintf("Chunk %d received HTTP 429 Too Many Requests", s.Index))
+
 					retryAfterSec := 5
 					if ra := resp.Header.Get("Retry-After"); ra != "" {
 						if sec, err := strconv.Atoi(ra); err == nil && sec > 0 {
@@ -487,12 +567,16 @@ func (d *Downloader) downloadSegmentedOnce(
 				// Check if server returned 200 OK for Range request with start > 0 (server doesn't support Range)
 				if resp.StatusCode == http.StatusOK && currentPos > 0 {
 					resp.Body.Close()
+					close(attemptDone)
+					cancelReq()
 					setErr(fmt.Errorf("server does not support HTTP Range requests (returned 200 OK for range starting at byte %d)", currentPos))
 					return
 				}
 
 				if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
 					resp.Body.Close()
+					close(attemptDone)
+					cancelReq()
 					if attempt == maxRetries {
 						setErr(fmt.Errorf("chunk %d received unexpected HTTP %d (%s)", s.Index, resp.StatusCode, resp.Status))
 						return
@@ -504,14 +588,23 @@ func (d *Downloader) downloadSegmentedOnce(
 
 				buf := make([]byte, 128*1024) // 128KB read buffer per stream
 				chunkReadErr := false
+				proxyRotated := false
 
 				for {
 					select {
 					case <-ctx.Done():
 						resp.Body.Close()
+						close(attemptDone)
+						cancelReq()
 						setErr(ctx.Err())
 						return
 					default:
+					}
+
+					if startEpoch > 0 && d.getEpoch() != startEpoch {
+						resp.Body.Close()
+						proxyRotated = true
+						break
 					}
 
 					n, readErr := resp.Body.Read(buf)
@@ -520,6 +613,8 @@ func (d *Downloader) downloadSegmentedOnce(
 						_, writeErr := out.WriteAt(buf[:n], writePos)
 						if writeErr != nil {
 							resp.Body.Close()
+							close(attemptDone)
+							cancelReq()
 							setErr(fmt.Errorf("disk write failed at offset %d: %w", writePos, writeErr))
 							return
 						}
@@ -529,12 +624,26 @@ func (d *Downloader) downloadSegmentedOnce(
 
 					if readErr != nil {
 						resp.Body.Close()
+						if startEpoch > 0 && d.getEpoch() != startEpoch && ctx.Err() == nil {
+							proxyRotated = true
+							break
+						}
 						if readErr == io.EOF {
 							break
 						}
 						chunkReadErr = true
 						break
 					}
+				}
+
+				close(attemptDone)
+				cancelReq()
+
+				if proxyRotated && ctx.Err() == nil {
+					logger.Infof("Chunked", "Chunk %d switching to newly rotated WARP/Proxy IP at byte %d...", s.Index, s.Current.Load())
+					attempt--
+					backoff = time.Second
+					continue
 				}
 
 				if !chunkReadErr && s.Current.Load() > s.End {

@@ -22,6 +22,21 @@ func NewChunkedDownloader(client *http.Client) *ChunkedDownloader {
 	}
 }
 
+// Transport returns the underlying HTTP transport for dynamic proxy wiring.
+func (cd *ChunkedDownloader) Transport() *http.Transport {
+	return cd.dl.Transport()
+}
+
+// SetEpochProvider forwards the rotation epoch provider to the underlying chunked downloader.
+func (cd *ChunkedDownloader) SetEpochProvider(fn func() uint64) {
+	cd.dl.SetEpochProvider(fn)
+}
+
+// SetRateLimitCallback forwards the rate limit callback to the underlying chunked downloader.
+func (cd *ChunkedDownloader) SetRateLimitCallback(fn func(reason string)) {
+	cd.dl.SetRateLimitCallback(fn)
+}
+
 // DownloadSegmented downloads a file in parallel chunks using HTTP Range requests.
 func (cd *ChunkedDownloader) DownloadSegmented(
 	ctx context.Context,
