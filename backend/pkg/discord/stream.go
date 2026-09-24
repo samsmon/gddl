@@ -131,6 +131,15 @@ func (d *Downloader) downloadSingleStream(
 			}
 		}
 
+		readDone := make(chan struct{})
+		go func(body io.Closer) {
+			select {
+			case <-readDone:
+			case <-ctx.Done():
+				_ = body.Close()
+			}
+		}(resp.Body)
+
 		pr := &progressReader{
 			ctx:            ctx,
 			reader:         resp.Body,
@@ -143,6 +152,7 @@ func (d *Downloader) downloadSingleStream(
 			epochProvider:  d.getEpoch,
 		}
 		written, copyErr := io.CopyBuffer(out, pr, make([]byte, 1024*1024))
+		close(readDone)
 		out.Close()
 		resp.Body.Close()
 

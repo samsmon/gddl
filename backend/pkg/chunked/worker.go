@@ -159,6 +159,16 @@ func (d *Downloader) downloadSegmentWorker(
 			continue
 		}
 
+		// Instantly sever TCP socket if user pauses or cancels, eliminating buffer wait lag
+		go func(body io.Closer) {
+			select {
+			case <-attemptDone:
+			case <-ctx.Done():
+				cancelReq()
+				_ = body.Close()
+			}
+		}(resp.Body)
+
 		buf := make([]byte, 128*1024)
 		chunkReadErr := false
 		proxyRotated := false

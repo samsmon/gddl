@@ -7,7 +7,7 @@
   <!-- Modal: Options / Settings -->
   {#if app.showSettingsModal}
     <div class="modal-overlay" role="presentation" onclick={() => app.showSettingsModal = false} onkeydown={(e) => e.key === 'Escape' && (app.showSettingsModal = false)}>
-      <div class="modal-window" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+      <div class="modal-window" style="max-width: 620px;" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
         <div class="modal-header">
           <span>Options & Preferences</span>
           <button class="modal-close" aria-label="Close" onclick={() => app.showSettingsModal = false}>

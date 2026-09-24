@@ -38,6 +38,68 @@ export function attachActionsPart5(app) {
     }
   }
 
+  function applyDownloadListUpdate(currentList, newList) {
+    if (!currentList || currentList.length === 0) return newList || [];
+    if (!newList || newList.length === 0) return [];
+
+    if (currentList.length !== newList.length) {
+      const currentMap = new Map(currentList.map(item => [item.id, item]));
+      return newList.map(newItem => {
+        const existing = currentMap.get(newItem.id);
+        if (!existing) return newItem;
+        Object.assign(existing, newItem);
+        return existing;
+      });
+    }
+
+    let idMismatch = false;
+    for (let i = 0; i < newList.length; i++) {
+      if (currentList[i].id !== newList[i].id) {
+        idMismatch = true;
+        break;
+      }
+    }
+
+    if (idMismatch) {
+      const currentMap = new Map(currentList.map(item => [item.id, item]));
+      return newList.map(newItem => {
+        const existing = currentMap.get(newItem.id);
+        if (!existing) return newItem;
+        Object.assign(existing, newItem);
+        return existing;
+      });
+    }
+
+    for (let i = 0; i < newList.length; i++) {
+      const cur = currentList[i];
+      const next = newList[i];
+
+      if (cur.status !== next.status) cur.status = next.status;
+      if (cur.downloaded_bytes !== next.downloaded_bytes) cur.downloaded_bytes = next.downloaded_bytes;
+      if (cur.total_bytes !== next.total_bytes) cur.total_bytes = next.total_bytes;
+      if (cur.speed !== next.speed) cur.speed = next.speed;
+      if (cur.eta_seconds !== next.eta_seconds) cur.eta_seconds = next.eta_seconds;
+      if (cur.percentage !== next.percentage) cur.percentage = next.percentage;
+      if (cur.error !== next.error) cur.error = next.error;
+      if (cur.chunks !== next.chunks) cur.chunks = next.chunks;
+      if (cur.target_folder !== next.target_folder) cur.target_folder = next.target_folder;
+      if (cur.compression_progress !== next.compression_progress) cur.compression_progress = next.compression_progress;
+      if (cur.completed_files !== next.completed_files) cur.completed_files = next.completed_files;
+
+      if (cur.folder_files && next.folder_files && cur.folder_files.length === next.folder_files.length) {
+        for (let j = 0; j < next.folder_files.length; j++) {
+          if (cur.folder_files[j].status !== next.folder_files[j].status) {
+            cur.folder_files[j].status = next.folder_files[j].status;
+          }
+        }
+      } else if (next.folder_files) {
+        cur.folder_files = next.folder_files;
+      }
+    }
+
+    return currentList;
+  }
+
   app.fetchDownloads = async function() {
     if (app.authEnabled && !app.isAuthenticated) return;
     try {
@@ -48,7 +110,8 @@ export function attachActionsPart5(app) {
         return;
       }
       if (res.ok) {
-        app.downloads = await res.json();
+        const data = await res.json();
+        app.downloads = applyDownloadListUpdate(app.downloads, data);
         app.backendConnected = true;
       }
     } catch (e) {
@@ -64,7 +127,8 @@ export function attachActionsPart5(app) {
       app.eventSource.onopen = () => { app.backendConnected = true; };
       app.eventSource.onmessage = (event) => {
         try {
-          app.downloads = JSON.parse(event.data);
+          const data = JSON.parse(event.data);
+          app.downloads = applyDownloadListUpdate(app.downloads, data);
           app.backendConnected = true;
         } catch (err) {
           console.error(err);

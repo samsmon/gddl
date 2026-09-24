@@ -72,11 +72,8 @@ export class DerivedState extends CoreState {
       if (valA > valB) return this.sortDirection === 'asc' ? 1 : -1;
 
       // Stable deterministic tie-breaker (IDM style):
-      // Prevents rows with identical status/values from randomly swapping or jumping around on updates
-      const timeA = new Date(a.created_at || a.last_try_at || 0).getTime();
-      const timeB = new Date(b.created_at || b.last_try_at || 0).getTime();
-      if (timeA !== timeB) return timeB - timeA; // newer first
-      return (a.id || '').localeCompare(b.id || '');
+      // Prevents rows with identical values from randomly jumping around when timestamps update
+      return (b.id || '').localeCompare(a.id || '');
     });
 
     return list;

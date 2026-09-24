@@ -118,23 +118,6 @@
             </span>
             <span class="dropdown-text">{app.hideCompleted ? 'Show Completed Downloads' : 'Hide Completed Downloads'}</span>
           </button>
-          <div class="menu-divider"></div>
-          <button class="dropdown-item" onclick={() => { app.activeFilter = 'all'; app.closeMenus(); }}>
-            <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H4.99c-1.11 0-1.98.89-1.98 2L3 19c0 1.1.88 2 1.99 2H19c1.1 0 2-.9 2-2V5c0-1.11-.9-2-2-2zm0 12h-4c0 1.66-1.35 3-3 3s-3-1.34-3-3H4.99V5H19v10z"/></svg></span>
-            <span class="dropdown-text">All Downloads ({app.counts.all})</span>
-          </button>
-          <button class="dropdown-item" onclick={() => { app.activeFilter = 'downloading'; app.closeMenus(); }}>
-            <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg></span>
-            <span class="dropdown-text">Downloading ({app.counts.downloading})</span>
-          </button>
-          <button class="dropdown-item" onclick={() => { app.activeFilter = 'completed'; app.closeMenus(); }}>
-            <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg></span>
-            <span class="dropdown-text">Completed ({app.counts.completed})</span>
-          </button>
-          <button class="dropdown-item" onclick={() => { app.activeFilter = 'missing'; app.closeMenus(); }}>
-            <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg></span>
-            <span class="dropdown-text">Missing / Moved ({app.counts.missing})</span>
-          </button>
         </div>
       {/if}
     </div>

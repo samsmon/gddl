@@ -137,12 +137,26 @@ func (d *Downloader) downloadStream(ctx context.Context, finalResp *http.Respons
 	}
 	defer out.Close()
 	logger.Infof("Download", "Receiving '%s' (Length: %d bytes, Starting: %d bytes)", filename, totalSize, startOffset)
+
+	streamDone := make(chan struct{})
+	defer close(streamDone)
+	go func(body io.Closer) {
+		select {
+		case <-streamDone:
+		case <-ctx.Done():
+			_ = body.Close()
+		}
+	}(finalResp.Body)
+
 	pr := &progressReader{ctx: ctx, reader: finalResp.Body, totalBytes: totalSize, downloaded: startOffset, lastDownloaded: startOffset, lastReport: time.Now(), onProgress: onProgress}
 	copied, err := io.CopyBuffer(out, pr, make([]byte, 1024*1024))
 	if err != nil {
 		out.Close()
+		if ctx.Err() != nil {
+			return filename, copied, ctx.Err()
+		}
 		_ = os.Remove(destPath)
-		if ctx.Err() == nil && !strings.Contains(err.Error(), "context canceled") {
+		if !strings.Contains(err.Error(), "context canceled") {
 			logger.Errorf("Download", "Interrupted/failed downloading '%s': %v", filename, err)
 		}
 		return filename, copied, err
