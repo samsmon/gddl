@@ -4,14 +4,18 @@ import { parseCookieInput } from '../utils/formatters.js';
 export class DerivedState extends CoreState {
   filteredDownloads = $derived.by(() => {
     let list = this.downloads.filter(item => {
-      // Filter out completed downloads if hideCompleted is enabled (except when user explicitly views completed tab)
-      if (this.hideCompleted && item.status === 'completed' && this.activeFilter !== 'completed') return false;
+      // Filter by IDM category / status
+      if (this.activeFilter === 'unfinished' && item.status === 'completed') return false;
+      if ((this.activeFilter === 'finished' || this.activeFilter === 'completed') && item.status !== 'completed') return false;
 
-      // Filter by status
+      const isDisc = (item.url || '').toLowerCase().includes('discordapp.com') || (item.url || '').toLowerCase().includes('discordapp.net');
+      if (this.activeFilter === 'gdrive' && isDisc) return false;
+      if (this.activeFilter === 'discord' && !isDisc) return false;
+
+      // Filter by detailed status
       if (this.activeFilter === 'downloading' && item.status !== 'downloading' && item.status !== 'compressing' && item.status !== 'moving') return false;
       if (this.activeFilter === 'queued' && item.status !== 'queued') return false;
       if (this.activeFilter === 'paused' && item.status !== 'paused') return false;
-      if (this.activeFilter === 'completed' && item.status !== 'completed') return false;
       if (this.activeFilter === 'missing' && item.status !== 'missing') return false;
       if (this.activeFilter === 'corrupted' && item.status !== 'corrupted') return false;
       if (this.activeFilter === 'failed' && item.status !== 'failed' && item.status !== 'cancelled') return false;
@@ -88,19 +92,68 @@ export class DerivedState extends CoreState {
     return this.downloads.find(d => d.id === this.selectedIds[this.selectedIds.length - 1]) || null;
   });
 
-  counts = $derived.by(() => ({
-    all: this.downloads.length,
-    downloading: this.downloads.filter(d => d.status === 'downloading' || d.status === 'compressing' || d.status === 'moving').length,
-    queued: this.downloads.filter(d => d.status === 'queued').length,
-    paused: this.downloads.filter(d => d.status === 'paused').length,
-    completed: this.downloads.filter(d => d.status === 'completed').length,
-    missing: this.downloads.filter(d => d.status === 'missing').length,
-    corrupted: this.downloads.filter(d => d.status === 'corrupted').length,
-    failed: this.downloads.filter(d => d.status === 'failed' || d.status === 'cancelled').length,
-    totalSpeed: this.downloads
-      .filter(d => d.status === 'downloading')
-      .reduce((sum, d) => sum + (d.speed || 0), 0)
-  }));
+  counts = $derived.by(() => {
+    let all = this.downloads.length;
+    let unfinished = 0;
+    let finished = 0;
+    let gdrive = 0;
+    let discord = 0;
+    let downloading = 0;
+    let queued = 0;
+    let paused = 0;
+    let completed = 0;
+    let missing = 0;
+    let corrupted = 0;
+    let failed = 0;
+    let totalSpeed = 0;
+
+    for (const d of this.downloads) {
+      if (d.status === 'completed') {
+        finished++;
+        completed++;
+      } else {
+        unfinished++;
+      }
+
+      const u = (d.url || '').toLowerCase();
+      if (u.includes('discordapp.com') || u.includes('discordapp.net')) {
+        discord++;
+      } else {
+        gdrive++;
+      }
+
+      if (d.status === 'downloading' || d.status === 'compressing' || d.status === 'moving') {
+        downloading++;
+        totalSpeed += (d.speed || 0);
+      } else if (d.status === 'queued') {
+        queued++;
+      } else if (d.status === 'paused') {
+        paused++;
+      } else if (d.status === 'missing') {
+        missing++;
+      } else if (d.status === 'corrupted') {
+        corrupted++;
+      } else if (d.status === 'failed' || d.status === 'cancelled') {
+        failed++;
+      }
+    }
+
+    return {
+      all,
+      unfinished,
+      finished,
+      gdrive,
+      discord,
+      downloading,
+      queued,
+      paused,
+      completed,
+      missing,
+      corrupted,
+      failed,
+      totalSpeed
+    };
+  });
 
   canResumeAll = $derived(this.counts.paused > 0 || this.counts.failed > 0 || this.counts.queued > 0);
 

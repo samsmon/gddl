@@ -108,15 +108,17 @@
             <span class="dropdown-text">Reset Column Widths</span>
           </button>
           <div class="menu-divider"></div>
-          <button class="dropdown-item" onclick={() => { app.toggleHideCompleted(); app.closeMenus(); }}>
-            <span class="dropdown-icon">
-              {#if app.hideCompleted}
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-              {:else}
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
-              {/if}
-            </span>
-            <span class="dropdown-text">{app.hideCompleted ? 'Show Completed Downloads' : 'Hide Completed Downloads'}</span>
+          <button class="dropdown-item" onclick={() => { app.activeFilter = 'all'; app.closeMenus(); }}>
+            <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg></span>
+            <span class="dropdown-text">View: All Downloads</span>
+          </button>
+          <button class="dropdown-item" onclick={() => { app.activeFilter = 'unfinished'; app.closeMenus(); }}>
+            <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg></span>
+            <span class="dropdown-text">View: Unfinished Downloads</span>
+          </button>
+          <button class="dropdown-item" onclick={() => { app.activeFilter = 'finished'; app.closeMenus(); }}>
+            <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+            <span class="dropdown-text">View: Finished Downloads</span>
           </button>
         </div>
       {/if}

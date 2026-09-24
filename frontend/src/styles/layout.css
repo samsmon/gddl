@@ -23,19 +23,24 @@
 /* Workspace */
 .main-body, .workspace { flex: 1 1 0; display: flex; overflow: hidden; min-height: 0; }
 /* Left Sidebar */
-.sidebar { width: 190px; background: var(--sidebar-bg); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; flex-shrink: 0; }
+.sidebar { width: 195px; background: var(--sidebar-bg); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; flex-shrink: 0; }
 .sidebar-header { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; color: var(--text-dim); padding: 0.65rem 0.85rem 0.25rem; letter-spacing: 0.05em; }
-.category-list { display: flex; flex-direction: column; padding: 0.25rem 0.5rem; gap: 1px; }
-.cat-item { display: flex; justify-content: space-between; align-items: center; padding: 0.35rem 0.6rem; border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 0.8rem; text-align: left; }
+.sidebar-section-title { font-size: 0.63rem; font-weight: 700; text-transform: uppercase; color: var(--text-dim); padding: 0.55rem 0.6rem 0.15rem 0.75rem; letter-spacing: 0.06em; margin-top: 0.25rem; }
+.category-list { display: flex; flex-direction: column; padding: 0.25rem 0.45rem; gap: 1px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.cat-item { display: flex; justify-content: space-between; align-items: center; padding: 0.32rem 0.55rem; border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 0.78rem; text-align: left; }
 .cat-item:hover { background: var(--table-row-hover); color: var(--text-main); }
 .cat-item.active { background: var(--accent-blue); color: #ffffff; font-weight: 600; }
+.cat-item.active svg { stroke: #ffffff; }
+.cat-sub-item { padding-left: 1.15rem; }
+.cat-status-item { padding-left: 0.75rem; }
 .cat-label { display: flex; align-items: center; gap: 0.45rem; }
-.cat-badge { font-size: 0.75rem; font-family: var(--font-mono); opacity: 0.85; }
+.cat-badge { font-size: 0.72rem; font-family: var(--font-mono); opacity: 0.85; }
 .status-indicator { width: 6px; height: 6px; border-radius: 50%; }
 .active-dot { background: var(--accent-blue); }
 .queued-dot { background: var(--accent-amber); }
 .paused-dot { background: #eab308; }
 .completed-dot { background: var(--accent-green); }
+.missing-dot { background: #f59e0b; }
 .corrupt-dot { background: var(--accent-red); }
 .failed-dot { background: var(--accent-red); }
 .sidebar-folder-box { margin-top: auto; padding: 0.75rem; border-top: 1px solid var(--border-color); background: var(--sidebar-bg); }
