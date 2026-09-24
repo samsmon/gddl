@@ -32,7 +32,8 @@ cleanup() {
     fi
     exit 0
 }
-trap cleanup SIGTERM SIGINT
+trap cleanup TERM INT
+
 
 # Exec main application
 exec /app/gdrive-downloader "$@"
