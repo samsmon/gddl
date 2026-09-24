@@ -107,3 +107,48 @@ func TestDiscordQueueIntegration(t *testing.T) {
 		t.Errorf("expected item1 to be in queueChan, but channel was empty")
 	}
 }
+
+func TestGetUniqueFilename(t *testing.T) {
+	mgr := &Manager{
+		items: make(map[string]*DownloadItem),
+	}
+
+	targetDir := t.TempDir()
+	existingName := "2026_WEB-FLAC_24bit_48kHz.rar"
+
+	item1 := &DownloadItem{
+		ID:           "item-1",
+		Filename:     existingName,
+		TargetFolder: targetDir,
+	}
+	mgr.items[item1.ID] = item1
+
+	// Attempting to resolve the same name for a new item should yield (2)
+	uniqueName2 := mgr.getUniqueFilename(targetDir, existingName, "item-2")
+	expected2 := "2026_WEB-FLAC_24bit_48kHz (2).rar"
+	if uniqueName2 != expected2 {
+		t.Errorf("expected %s, got %s", expected2, uniqueName2)
+	}
+
+	// Add item-2 with the resolved name
+	item2 := &DownloadItem{
+		ID:           "item-2",
+		Filename:     uniqueName2,
+		TargetFolder: targetDir,
+	}
+	mgr.items[item2.ID] = item2
+
+	// Attempting to resolve again should yield (3)
+	uniqueName3 := mgr.getUniqueFilename(targetDir, existingName, "item-3")
+	expected3 := "2026_WEB-FLAC_24bit_48kHz (3).rar"
+	if uniqueName3 != expected3 {
+		t.Errorf("expected %s, got %s", expected3, uniqueName3)
+	}
+
+	// However, if resolving for item1 itself (same item ID), it should keep its own name
+	keptName := mgr.getUniqueFilename(targetDir, existingName, "item-1")
+	if keptName != existingName {
+		t.Errorf("expected %s, got %s", existingName, keptName)
+	}
+}
+

@@ -384,6 +384,15 @@ func (m *Manager) worker() {
 			desiredName = item.Filename
 		}
 
+		m.mu.Lock()
+		if desiredName != "" {
+			desiredName = m.getUniqueFilename(item.TargetFolder, desiredName, item.ID)
+			item.mu.Lock()
+			item.Filename = desiredName
+			item.mu.Unlock()
+		}
+		m.mu.Unlock()
+
 		displayName := item.Filename
 		if displayName == "" {
 			displayName = item.FileID
@@ -791,7 +800,12 @@ func (m *Manager) PrecheckDownloads(rawURLs []string, targetFolder string, zipMo
 			if dErr != nil {
 				continue
 			}
-			fileID = dFilename
+			_, attID, _, _ := discord.ExtractDiscordIDs(rawURL)
+			if attID != "" {
+				fileID = attID
+			} else {
+				fileID = dFilename
+			}
 			if isExp {
 				title = dFilename + " (EXPIRED)"
 			} else {
@@ -805,7 +819,6 @@ func (m *Manager) PrecheckDownloads(rawURLs []string, targetFolder string, zipMo
 				if headErr == nil && fn != "" {
 					expectedFilename = fn
 					title = fn
-					fileID = fn
 				}
 			}
 		} else if folderID, isF := gdrive.IsFolderURL(rawURL); isF {
@@ -1179,7 +1192,12 @@ func (m *Manager) AddWithResolutions(rawURLs []string, targetFolder string, zipM
 			if dErr != nil {
 				continue
 			}
-			fileID = dFn
+			_, attID, _, _ := discord.ExtractDiscordIDs(rawURL)
+			if attID != "" {
+				fileID = attID
+			} else {
+				fileID = dFn
+			}
 			fn = dFn
 			if isExp {
 				id := fmt.Sprintf("%d_discord_%s", time.Now().UnixNano(), fileID)
@@ -1241,14 +1259,13 @@ func (m *Manager) AddWithResolutions(rawURLs []string, targetFolder string, zipM
 		} else {
 			if existingItem != nil && existingItem.Filename != "" {
 				fn = existingItem.Filename
-			} else {
-				// fileID is already the filename extracted from Discord URL
-				fn = fileID
 			}
 		}
 
-		if action == "rename" {
-			fn = gdrive.UniqueFilename(targetFolder, fn)
+		if action == "rename" || (action == "" && existingItem == nil) {
+			m.mu.Lock()
+			fn = m.getUniqueFilename(targetFolder, fn, "")
+			m.mu.Unlock()
 		} else if action == "overwrite" {
 			if existingItem != nil {
 				existingItem.mu.Lock()
@@ -2086,4 +2103,53 @@ func (m *Manager) BatchUpdateDiscordURLs(newURLs []string) (int, int, error) {
 	}
 
 	return updatedCount, notFoundCount, nil
+}
+
+// getUniqueFilename resolves filename collisions against files on disk and items currently in the queue.
+// Must be called with m.mu held or safe for reading m.items.
+func (m *Manager) getUniqueFilename(targetFolder, filename, excludeItemID string) string {
+	if filename == "" {
+		return filename
+	}
+
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filename, ext)
+
+	candidate := filename
+	counter := 2
+
+	for {
+		collision := false
+
+		// 1. Check if final file exists on disk
+		finalPath := filepath.Join(targetFolder, candidate)
+		if fi, err := os.Stat(finalPath); err == nil && !fi.IsDir() {
+			collision = true
+		}
+
+		// 2. Check if another item in queue is using this filename in the same folder
+		if !collision {
+			for _, it := range m.items {
+				if it.ID == excludeItemID {
+					continue
+				}
+				it.mu.RLock()
+				sameFolder := strings.EqualFold(filepath.Clean(it.TargetFolder), filepath.Clean(targetFolder))
+				sameName := strings.EqualFold(it.Filename, candidate)
+				it.mu.RUnlock()
+
+				if sameFolder && sameName {
+					collision = true
+					break
+				}
+			}
+		}
+
+		if !collision {
+			return candidate
+		}
+
+		candidate = fmt.Sprintf("%s (%d)%s", base, counter, ext)
+		counter++
+	}
 }

@@ -5016,18 +5016,26 @@ Or paste AI scraper JSON array:
   .table-container {
     flex: 1;
     overflow: auto;
+    position: relative;
   }
   .torrent-table {
     width: 100%;
-    border-collapse: collapse;
+    border-collapse: separate;
+    border-spacing: 0;
     font-size: 0.8rem;
     text-align: left;
     white-space: nowrap;
     table-layout: fixed;
   }
+  .torrent-table thead {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
   .torrent-table th {
     position: sticky;
     top: 0;
+    z-index: 20;
     background: var(--table-header-bg);
     color: var(--text-muted);
     font-weight: 600;
@@ -5035,8 +5043,8 @@ Or paste AI scraper JSON array:
     border-bottom: 1px solid var(--border-color);
     border-right: 1px solid var(--border-subtle);
     font-size: 0.75rem;
-    position: relative;
     user-select: none;
+    box-shadow: 0 1px 0 var(--border-color);
   }
 
   .th-sortable {
@@ -5087,6 +5095,7 @@ Or paste AI scraper JSON array:
   .torrent-table td {
     padding: 0.35rem 0.6rem;
     border-right: 1px solid var(--border-subtle);
+    border-bottom: 1px solid var(--border-subtle);
     overflow: hidden;
     text-overflow: ellipsis;
     box-sizing: border-box;

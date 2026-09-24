@@ -102,3 +102,83 @@ func TestDiscordDownloader_Download(t *testing.T) {
 		t.Errorf("saved file bytes do not match original payload!")
 	}
 }
+
+func TestDiscordDownloader_416Recovery(t *testing.T) {
+	testData := []byte("hello-discord-world-flac-data")
+	dataLen := len(testData)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rangeHeader := r.Header.Get("Range")
+		if strings.HasPrefix(rangeHeader, "bytes=") {
+			startStr := strings.TrimPrefix(rangeHeader, "bytes=")
+			startStr = strings.TrimSuffix(startStr, "-")
+			start, _ := strconv.Atoi(startStr)
+			if start >= dataLen {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", dataLen))
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+		}
+
+		w.Header().Set("Content-Length", strconv.Itoa(dataLen))
+		w.WriteHeader(http.StatusOK)
+		w.Write(testData)
+	}))
+	defer server.Close()
+
+	destDir := t.TempDir()
+	dl := NewDownloader()
+	dl.client = server.Client()
+
+	mockURL := server.URL + "/attachments/123/456/song.flac?ex=7fffffff"
+	partPath := filepath.Join(destDir, "song.flac.part")
+	destPath := filepath.Join(destDir, "song.flac")
+
+	// Case 1: .part has exact file size -> 416 should finalize file immediately
+	_ = os.WriteFile(partPath, testData, 0644)
+	fn, written, err := dl.Download(context.Background(), mockURL, destDir, nil)
+	if err != nil {
+		t.Fatalf("Download failed during 416 completion: %v", err)
+	}
+	if fn != "song.flac" || written != int64(dataLen) {
+		t.Errorf("got fn=%q, written=%d", fn, written)
+	}
+	if _, err := os.Stat(destPath); err != nil {
+		t.Errorf("expected %s to exist after finalize", destPath)
+	}
+
+	// Case 2: .part has corrupted/oversized bytes -> 416 should reset .part and redownload from 0
+	_ = os.Remove(destPath)
+	_ = os.WriteFile(partPath, []byte("too-many-bytes-than-actual-server-file-length-1234567890"), 0644)
+	fn, written, err = dl.Download(context.Background(), mockURL, destDir, nil)
+	if err != nil {
+		t.Fatalf("Download failed during 416 reset recovery: %v", err)
+	}
+	if written != int64(dataLen) {
+		t.Errorf("written = %d, want %d", written, dataLen)
+	}
+	resBytes, err := os.ReadFile(destPath)
+	if err != nil || !bytes.Equal(resBytes, testData) {
+		t.Errorf("saved file does not match expected testData")
+	}
+}
+
+func TestFinalizeDownloadedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	partPath := filepath.Join(tmpDir, "test.bin.part")
+	destPath := filepath.Join(tmpDir, "test.bin")
+
+	testContent := []byte("audio-data-chunk")
+	_ = os.WriteFile(partPath, testContent, 0644)
+
+	// Finalize should succeed
+	if err := finalizeDownloadedFile(partPath, destPath, int64(len(testContent))); err != nil {
+		t.Fatalf("finalizeDownloadedFile failed: %v", err)
+	}
+
+	// Already finalized should also succeed without error
+	if err := finalizeDownloadedFile(partPath, destPath, int64(len(testContent))); err != nil {
+		t.Fatalf("finalizeDownloadedFile on already finalized file failed: %v", err)
+	}
+}
+

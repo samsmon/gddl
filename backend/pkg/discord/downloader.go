@@ -358,6 +358,38 @@ func (d *Downloader) Download(
 			return filename, existingBytes, fmt.Errorf("access denied or Discord attachment signature expired (HTTP %d)", resp.StatusCode)
 		}
 
+		// Handle HTTP 416: Requested Range Not Satisfiable
+		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+			resp.Body.Close()
+
+			contentRange := resp.Header.Get("Content-Range")
+			var remoteTotal int64 = -1
+			if idx := strings.LastIndex(contentRange, "/"); idx != -1 {
+				if val, parseErr := strconv.ParseInt(strings.TrimSpace(contentRange[idx+1:]), 10, 64); parseErr == nil {
+					remoteTotal = val
+				}
+			}
+
+			// If local .part is exactly equal to remoteTotal and remoteTotal > 0, the file was already fully downloaded
+			if remoteTotal > 0 && existingBytes == remoteTotal {
+				logger.Infof("Discord", "File '%s' already fully downloaded (%d bytes), finalizing...", filename, existingBytes)
+				if err := finalizeDownloadedFile(partPath, destPath, remoteTotal); err != nil {
+					return filename, existingBytes, fmt.Errorf("failed to finalize downloaded file: %w", err)
+				}
+				if onProgress != nil {
+					onProgress(remoteTotal, remoteTotal, 0, 0, 100)
+				}
+				return filename, remoteTotal, nil
+			}
+
+			// Local part is corrupted or out of range. Delete and restart from byte 0.
+			logger.Warnf("Discord", "HTTP 416 Range mismatch for '%s' (local .part size: %d, remote: %d). Resetting invalid .part and restarting from 0...", filename, existingBytes, remoteTotal)
+			_ = os.Remove(partPath)
+			existingBytes = 0
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 			resp.Body.Close()
 			if resp.StatusCode >= 500 && attempt < maxAttempts {
@@ -423,12 +455,8 @@ func (d *Downloader) Download(
 		}
 
 		// Download successfully finished!
-		if err := os.Rename(partPath, destPath); err != nil {
-			// On Windows, if destination exists, remove first
-			_ = os.Remove(destPath)
-			if err := os.Rename(partPath, destPath); err != nil {
-				return filename, existingBytes + written, fmt.Errorf("failed to finalize downloaded file: %w", err)
-			}
+		if err := finalizeDownloadedFile(partPath, destPath, totalBytes); err != nil {
+			return filename, existingBytes + written, fmt.Errorf("failed to finalize downloaded file: %w", err)
 		}
 
 		if onProgress != nil {
@@ -439,4 +467,50 @@ func (d *Downloader) Download(
 	}
 
 	return filename, existingBytes, fmt.Errorf("failed to download from Discord CDN after %d attempts", maxAttempts)
+}
+
+// finalizeDownloadedFile safely moves the .part file to destPath, handling existing destinations,
+// already finalized files, and cross-filesystem copy fallbacks (e.g. Docker/Linux mount points).
+func finalizeDownloadedFile(partPath, destPath string, expectedSize int64) error {
+	// If partPath does not exist, check if destPath already exists with expected size
+	if _, err := os.Stat(partPath); os.IsNotExist(err) {
+		if destFi, statErr := os.Stat(destPath); statErr == nil && (expectedSize <= 0 || destFi.Size() == expectedSize) {
+			return nil
+		}
+		return fmt.Errorf("part file missing and destination file not finalized: %w", err)
+	}
+
+	// First attempt: direct rename
+	if err := os.Rename(partPath, destPath); err == nil {
+		return nil
+	}
+
+	// Destination might exist (especially on Windows) - remove and retry rename
+	_ = os.Remove(destPath)
+	if err := os.Rename(partPath, destPath); err == nil {
+		return nil
+	}
+
+	// Fallback for cross-device links (EXDEV) or filesystem mount issues (e.g. /mnt/hdd-backup): copy + remove
+	in, err := os.Open(partPath)
+	if err != nil {
+		return fmt.Errorf("failed to open part file for fallback copy: %w", err)
+	}
+	defer in.Close()
+
+	out, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file for fallback copy: %w", err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		_ = os.Remove(destPath)
+		return fmt.Errorf("failed during fallback file copy: %w", err)
+	}
+
+	_ = in.Close()
+	_ = out.Close()
+	_ = os.Remove(partPath)
+	return nil
 }
