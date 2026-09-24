@@ -185,6 +185,11 @@ export function attachActionsPart1(app) {
     }
   }
 
+  app.openSettings = function(tab = 'general') {
+    app.settingsTab = tab;
+    app.showSettingsModal = true;
+  }
+
   app.saveGoogleLogin = async function() {
     if (!app.loginCookieInput.trim()) return;
     app.isSavingLogin = true;

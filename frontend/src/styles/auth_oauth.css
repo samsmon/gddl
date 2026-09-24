@@ -24,3 +24,136 @@
 .hint-danger .hint-header { color: var(--accent-red); }
 /* Allow text selection in logs, details, errors, and cookie lists */
 .logs-modal-body, .logs-modal-body *, .logs-container, .log-row, .log-row *, .log-msg-col, .log-msg, .log-details, .log-time, .detail-panel, .detail-panel *, .detail-error, .cookie-pool-container, .cookie-pool-container * { user-select: text !important; -webkit-user-select: text !important; }
+
+/* Settings Modal with Internal Sidebar */
+.settings-modal-window {
+  width: 95%;
+  max-width: 760px !important;
+  height: 580px;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.settings-body-layout {
+  display: flex;
+  flex-direction: row;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 !important;
+}
+
+.settings-sidebar-nav {
+  width: 195px;
+  min-width: 175px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border-color);
+  padding: 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+  user-select: none;
+  overflow-y: auto;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+  width: 100%;
+}
+
+.settings-nav-item:hover {
+  background: var(--btn-hover);
+  color: var(--text-main);
+}
+
+.settings-nav-item.active {
+  background: rgba(56, 139, 253, 0.12);
+  border-color: rgba(56, 139, 253, 0.35);
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+
+.settings-nav-item.active svg {
+  stroke: var(--accent-blue);
+}
+
+.settings-nav-badge {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-muted);
+}
+
+.settings-nav-item.active .settings-nav-badge {
+  background: var(--accent-blue);
+  color: #fff;
+}
+
+.settings-pane-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 2px;
+}
+
+.settings-pane-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .settings-body-layout {
+    flex-direction: column;
+  }
+  .settings-sidebar-nav {
+    width: 100%;
+    flex-direction: row;
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+    overflow-x: auto;
+    padding: 6px;
+  }
+  .settings-nav-item {
+    white-space: nowrap;
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+  .settings-pane-container {
+    padding: 12px;
+  }
+}
+

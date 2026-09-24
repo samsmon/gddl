@@ -8,6 +8,7 @@ backend/config.json
 # Build binaries
 backend/*.exe
 backend/gdrive-downloader
+*.exe
 
 # Node
 frontend/node_modules/

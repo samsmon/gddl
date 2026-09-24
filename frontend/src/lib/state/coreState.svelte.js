@@ -55,6 +55,7 @@ export class CoreState {
   copiedLogs = $state(false);
   showAddModal = $state(false);
   showSettingsModal = $state(false);
+  settingsTab = $state('general');
   showLoginModal = $state(false);
   showFolderPicker = $state(false);
   folderPickerTarget = $state('add');
