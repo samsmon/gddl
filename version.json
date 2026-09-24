@@ -1,14 +1,15 @@
 {
-  "version": "1.3.1",
+  "version": "1.3.2",
   "commit": "latest",
   "date": "2026-09-24",
-  "title": "Real-Time Update Checker with GitHub Changelog & Pull/Rebuild Alerts",
-  "message": "feat(updater): implement live update detection with changelog and pull/rebuild guide",
+  "title": "Full Codebase Modularization & Real-Time GitHub Update System",
+  "message": "refactor(modularization): ensure 100% compliance with <=300 lines rule and live update alerts",
   "changelog": [
-    "Replaced hardcoded update modal with live GitHub repository update checker",
-    "Display update notification banner and commit change message when newer version is detected",
-    "Added copyable terminal commands for git pull and rebuild (frontend & backend)",
-    "Added statusbar update notification pill for unobtrusive background update alerts",
-    "Created version.json and /api/system/check-update endpoint for automated release tracking"
+    "Replaced hardcoded update modal with live GitHub repository update checker and changelog viewer",
+    "Display update warning with copyable git pull & rebuild instructions when newer version is detected",
+    "Added statusbar update notification pill for unobtrusive background release alerts",
+    "Categorized Settings Modal with dedicated internal sidebar tabs (General, WARP, Cookies, Security)",
+    "IDM-style sidebar categorization with Unfinished, Finished, and Source filters (Google Drive, Discord)",
+    "Strict codebase modularization ensuring 100% of files are <= 300 lines across backend and frontend"
   ]
 }
