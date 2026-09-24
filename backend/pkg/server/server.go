@@ -152,6 +152,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/downloads/{id}/check", s.handleCheckDownloadFile)
 	mux.HandleFunc("POST /api/downloads/check-all", s.handleCheckAllFiles)
 	mux.HandleFunc("POST /api/downloads/clear", s.handleClearCompleted)
+	mux.HandleFunc("POST /api/downloads/pause-all", s.handlePauseAllDownloads)
+	mux.HandleFunc("POST /api/downloads/resume-all", s.handleResumeAllDownloads)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 
 	// Discord specific batch management endpoints
@@ -551,6 +553,24 @@ func (s *Server) handleStartDownload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"started"}`))
+}
+
+func (s *Server) handlePauseAllDownloads(w http.ResponseWriter, r *http.Request) {
+	pausedCount := s.manager.PauseAll()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "paused_all",
+		"count":  pausedCount,
+	})
+}
+
+func (s *Server) handleResumeAllDownloads(w http.ResponseWriter, r *http.Request) {
+	resumedCount := s.manager.ResumeAll()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "resumed_all",
+		"count":  resumedCount,
+	})
 }
 
 func (s *Server) handleRestartDownload(w http.ResponseWriter, r *http.Request) {

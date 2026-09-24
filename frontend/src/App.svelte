@@ -242,6 +242,9 @@
       .reduce((sum, d) => sum + (d.speed || 0), 0)
   }));
 
+  let canResumeAll = $derived(counts.paused > 0 || counts.failed > 0 || counts.queued > 0);
+  let canStopAll = $derived(counts.downloading > 0 || counts.queued > 0);
+
   // Logs derived state
   let errorLogsCount = $derived(logs.filter(l => l.level === 'ERROR').length);
 
@@ -1681,21 +1684,23 @@
     }
   }
 
-  // Global Batch Controls
+  // Global Batch Controls (IDM Start Queue / Stop All)
   async function startAll() {
-    const toStart = downloads.filter(d => d.status === 'paused' || d.status === 'failed' || d.status === 'cancelled' || d.status === 'missing');
-    for (const item of toStart) {
-      fetch(`/api/downloads/${item.id}/start`, { method: 'POST' }).catch(console.error);
+    try {
+      await fetch('/api/downloads/resume-all', { method: 'POST' });
+      fetchDownloads();
+    } catch (e) {
+      console.error('Resume all failed', e);
     }
-    setTimeout(fetchDownloads, 250);
   }
 
   async function pauseAll() {
-    const toPause = downloads.filter(d => d.status === 'downloading' || d.status === 'queued' || d.status === 'compressing');
-    for (const item of toPause) {
-      fetch(`/api/downloads/${item.id}/pause`, { method: 'POST' }).catch(console.error);
+    try {
+      await fetch('/api/downloads/pause-all', { method: 'POST' });
+      fetchDownloads();
+    } catch (e) {
+      console.error('Pause all failed', e);
     }
-    setTimeout(fetchDownloads, 250);
   }
 
   function invertSelection() {
@@ -2142,11 +2147,11 @@
           <div class="menu-divider"></div>
           <button class="dropdown-item" onclick={() => { startAll(); closeMenus(); }}>
             <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span>
-            <span class="dropdown-text">Resume All</span>
+            <span class="dropdown-text">Resume All (Start Queue)</span>
           </button>
           <button class="dropdown-item" onclick={() => { pauseAll(); closeMenus(); }}>
-            <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg></span>
-            <span class="dropdown-text">Pause All</span>
+            <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg></span>
+            <span class="dropdown-text">Stop All</span>
           </button>
           <button class="dropdown-item" onclick={() => { checkAllFiles(); closeMenus(); }}>
             <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></span>
@@ -2372,6 +2377,32 @@
           <rect x="14" y="4" width="4" height="16"></rect>
         </svg>
         <span>Pause</span>
+      </button>
+
+      <!-- Stop All (IDM style) -->
+      <button
+        class="tb-btn tb-btn-stop"
+        disabled={!canStopAll}
+        onclick={pauseAll}
+        title="Stop all active and queued downloads"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <rect x="5" y="5" width="14" height="14" rx="2"></rect>
+        </svg>
+        <span>Stop All</span>
+      </button>
+
+      <!-- Resume All / Start Queue (IDM style) -->
+      <button
+        class="tb-btn tb-btn-resume"
+        disabled={!canResumeAll}
+        onclick={startAll}
+        title="Resume all downloads / Start Queue (IDM style)"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M5 3.868v16.264a1 1 0 0 0 1.54.841l12.44-8.132a1 1 0 0 0 0-1.682L6.54 3.027A1 1 0 0 0 5 3.868z"/>
+        </svg>
+        <span>Resume All</span>
       </button>
 
       <!-- Restart (IDM) -->
@@ -4977,6 +5008,20 @@ Or paste AI scraper JSON array:
     border-color: var(--accent-blue);
     color: var(--accent-blue);
     font-weight: 600;
+  }
+  .tb-btn-stop:not(:disabled) {
+    color: #f87171;
+  }
+  .tb-btn-stop:not(:disabled):hover {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: rgba(239, 68, 68, 0.4);
+  }
+  .tb-btn-resume:not(:disabled) {
+    color: #4ade80;
+  }
+  .tb-btn-resume:not(:disabled):hover {
+    background: rgba(34, 197, 94, 0.15);
+    border-color: rgba(34, 197, 94, 0.4);
   }
   .tb-badge-count {
     background: rgba(255, 255, 255, 0.16);

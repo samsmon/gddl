@@ -152,3 +152,124 @@ func TestGetUniqueFilename(t *testing.T) {
 	}
 }
 
+func TestPauseAllAndResumeAll(t *testing.T) {
+	mgr := &Manager{
+		items:       make(map[string]*DownloadItem),
+		order:       make([]string, 0),
+		queueChan:   make(chan *DownloadItem, 100),
+		subscribers: make(map[chan []DownloadItem]bool),
+		notifyChan:  make(chan struct{}, 1),
+	}
+
+	cancelledFlag := false
+	cancelFunc := func() {
+		cancelledFlag = true
+	}
+
+	// 1. Setup items
+	item1 := &DownloadItem{
+		ID:         "item-1",
+		Filename:   "file1.zip",
+		Status:     StatusDownloading,
+		Speed:      5000000,
+		ETASeconds: 30,
+		cancelFunc: cancelFunc,
+	}
+	item2 := &DownloadItem{
+		ID:       "item-2",
+		Filename: "file2.zip",
+		Status:   StatusQueued,
+	}
+	item3 := &DownloadItem{
+		ID:       "item-3",
+		Filename: "file3.zip",
+		Status:   StatusPaused,
+	}
+	item4 := &DownloadItem{
+		ID:       "item-4",
+		Filename: "file4.zip",
+		Status:   StatusCompleted,
+	}
+	item5 := &DownloadItem{
+		ID:       "item-5",
+		Filename: "file5.zip",
+		Status:   StatusFailed,
+		Error:    "network timeout",
+	}
+
+	mgr.mu.Lock()
+	mgr.items[item1.ID] = item1
+	mgr.items[item2.ID] = item2
+	mgr.items[item3.ID] = item3
+	mgr.items[item4.ID] = item4
+	mgr.items[item5.ID] = item5
+	mgr.order = append(mgr.order, item1.ID, item2.ID, item3.ID, item4.ID, item5.ID)
+	mgr.mu.Unlock()
+
+	// Put item2 in queueChan
+	mgr.queueChan <- item2
+
+	// 2. Test PauseAll
+	pausedCount := mgr.PauseAll()
+	if pausedCount != 2 {
+		t.Fatalf("expected 2 paused items (downloading & queued), got %d", pausedCount)
+	}
+	if !cancelledFlag {
+		t.Errorf("expected item1 cancelFunc to be called")
+	}
+	if item1.Status != StatusPaused || item1.Speed != 0 || item1.ETASeconds != 0 {
+		t.Errorf("expected item1 to be paused with 0 speed, got status=%s speed=%d", item1.Status, item1.Speed)
+	}
+	if item2.Status != StatusPaused {
+		t.Errorf("expected item2 to be paused, got status=%s", item2.Status)
+	}
+	if item3.Status != StatusPaused {
+		t.Errorf("expected item3 to remain paused, got status=%s", item3.Status)
+	}
+	if item4.Status != StatusCompleted {
+		t.Errorf("expected item4 to remain completed, got status=%s", item4.Status)
+	}
+
+	// Verify queueChan was drained
+	select {
+	case it := <-mgr.queueChan:
+		t.Errorf("expected queueChan to be empty, but found %s", it.ID)
+	default:
+		// correctly empty
+	}
+
+	// 3. Test ResumeAll
+	resumedCount := mgr.ResumeAll()
+	// item1 (paused), item2 (paused), item3 (paused), item5 (failed) should be resumed = 4
+	if resumedCount != 4 {
+		t.Fatalf("expected 4 resumed items, got %d", resumedCount)
+	}
+	if item4.Status != StatusCompleted {
+		t.Errorf("expected item4 to remain completed, got status=%s", item4.Status)
+	}
+	if item5.Status != StatusQueued || item5.Error != "" {
+		t.Errorf("expected item5 error to be cleared and status queued, got status=%s error=%s", item5.Status, item5.Error)
+	}
+
+	// Verify strict queue order in queueChan
+	expectedOrder := []string{"item-1", "item-2", "item-3", "item-5"}
+	for _, expectedID := range expectedOrder {
+		select {
+		case it := <-mgr.queueChan:
+			if it.ID != expectedID {
+				t.Errorf("expected dequeued ID %s, got %s", expectedID, it.ID)
+			}
+		default:
+			t.Fatalf("expected %s in queueChan, but channel was empty", expectedID)
+		}
+	}
+
+	// Channel should be empty now
+	select {
+	case it := <-mgr.queueChan:
+		t.Errorf("expected channel to be empty after reading expected items, got %s", it.ID)
+	default:
+	}
+}
+
+

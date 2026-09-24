@@ -164,7 +164,7 @@ func NewManager(defaultFolder string, concurrency int, dataFile ...string) (*Man
 	m := &Manager{
 		items:             make(map[string]*DownloadItem),
 		order:             make([]string, 0),
-		queueChan:         make(chan *DownloadItem, 2000),
+		queueChan:         make(chan *DownloadItem, 100000),
 		subscribers:       make(map[chan []DownloadItem]bool),
 		notifyChan:        make(chan struct{}, 1),
 		downloader:        dl,
@@ -1524,6 +1524,129 @@ func (m *Manager) Restart(id string) error {
 	m.triggerBroadcast()
 	m.saveToDisk()
 	return nil
+}
+
+// PauseAll atomically pauses all active, queued, and compressing downloads.
+// It drains pending items from the queue channel and cancels running download contexts.
+func (m *Manager) PauseAll() int {
+	// 1. Drain the queue channel so workers won't pick up waiting items
+	for {
+		select {
+		case <-m.queueChan:
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	// 2. Snapshot the list of items under read lock
+	m.mu.RLock()
+	items := make([]*DownloadItem, 0, len(m.order))
+	for _, id := range m.order {
+		if it, ok := m.items[id]; ok {
+			items = append(items, it)
+		}
+	}
+	m.mu.RUnlock()
+
+	pausedCount := 0
+	for _, item := range items {
+		item.mu.Lock()
+		if item.Status == StatusDownloading || item.Status == StatusQueued || item.Status == StatusCompressing {
+			item.Status = StatusPaused
+			if item.cancelFunc != nil {
+				item.cancelFunc()
+				item.cancelFunc = nil
+			}
+			item.Speed = 0
+			item.ETASeconds = 0
+			if item.IsFolder && item.ZipMode {
+				for i := range item.FolderFiles {
+					if item.FolderFiles[i].Status == "downloading" || item.FolderFiles[i].Status == "queued" {
+						item.FolderFiles[i].Status = "paused"
+					}
+				}
+			}
+			pausedCount++
+		}
+		item.mu.Unlock()
+	}
+
+	logger.Infof("Queue", "PauseAll: paused %d downloads", pausedCount)
+	m.saveToDisk()
+	m.triggerBroadcast()
+	return pausedCount
+}
+
+// ResumeAll queues all paused, failed, cancelled, and waiting items in their original queue order.
+// Available workers will concurrently download items up to MaxConcurrency, and as each file
+// completes, subsequent files in the queue are automatically downloaded.
+func (m *Manager) ResumeAll() int {
+	// 1. Drain any residual items from queue channel to ensure strict m.order sequencing
+	for {
+		select {
+		case <-m.queueChan:
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	// 2. Snapshot items in original queue order (m.order)
+	m.mu.RLock()
+	items := make([]*DownloadItem, 0, len(m.order))
+	for _, id := range m.order {
+		if it, ok := m.items[id]; ok {
+			items = append(items, it)
+		}
+	}
+	m.mu.RUnlock()
+
+	now := time.Now()
+	resumedCount := 0
+
+	for _, item := range items {
+		item.mu.Lock()
+		// If item is already downloading, compressing, or moving, leave it running
+		if item.Status == StatusDownloading || item.Status == StatusCompressing || item.Status == StatusMoving || item.Status == StatusCompleted {
+			item.mu.Unlock()
+			continue
+		}
+
+		// Re-queue paused, failed, cancelled, or already queued items
+		if item.Status == StatusPaused || item.Status == StatusFailed || item.Status == StatusCancelled || item.Status == StatusQueued {
+			item.Status = StatusQueued
+			item.Error = ""
+			item.Speed = 0
+			item.ETASeconds = 0
+			item.LastTryAt = now
+			if item.IsFolder && item.ZipMode {
+				for i := range item.FolderFiles {
+					if item.FolderFiles[i].Status != "completed" {
+						item.FolderFiles[i].Status = "queued"
+					}
+				}
+			}
+			item.mu.Unlock()
+
+			// Enqueue into queueChan (non-blocking with async overflow fallback)
+			select {
+			case m.queueChan <- item:
+			default:
+				go func(it *DownloadItem) {
+					m.queueChan <- it
+				}(item)
+			}
+			resumedCount++
+		} else {
+			item.mu.Unlock()
+		}
+	}
+
+	logger.Infof("Queue", "ResumeAll: queued %d downloads in queue order", resumedCount)
+	m.saveToDisk()
+	m.triggerBroadcast()
+	return resumedCount
 }
 
 func (m *Manager) SetItemTargetFolder(id string, newFolder string) error {
