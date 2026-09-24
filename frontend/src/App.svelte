@@ -5,6 +5,19 @@
   // State (Svelte 5 runes)
   let downloads = $state([]);
   let activeFilter = $state('all'); // all, downloading, queued, paused, completed, corrupted, failed
+  let hideCompleted = $state(false);
+  try {
+    const savedHide = localStorage.getItem('gddl_hide_completed');
+    if (savedHide !== null) hideCompleted = savedHide === 'true';
+  } catch (_) {}
+
+  function toggleHideCompleted() {
+    hideCompleted = !hideCompleted;
+    try {
+      localStorage.setItem('gddl_hide_completed', String(hideCompleted));
+    } catch (_) {}
+  }
+
   let searchQuery = $state('');
   let selectedIds = $state([]);
   let lastClickedId = $state(null);
@@ -128,6 +141,9 @@
   // Derived filtered & sorted items
   let filteredDownloads = $derived.by(() => {
     let list = downloads.filter(item => {
+      // Filter out completed downloads if hideCompleted is enabled (except when user explicitly views completed tab)
+      if (hideCompleted && item.status === 'completed' && activeFilter !== 'completed') return false;
+
       // Filter by status
       if (activeFilter === 'downloading' && item.status !== 'downloading' && item.status !== 'compressing' && item.status !== 'moving') return false;
       if (activeFilter === 'queued' && item.status !== 'queued') return false;
@@ -146,7 +162,7 @@
       return true;
     });
 
-    // Sorting
+    // Sorting with deterministic stable tie-breaker (like IDM)
     list.sort((a, b) => {
       let valA, valB;
       switch (sortColumn) {
@@ -191,7 +207,13 @@
 
       if (valA < valB) return sortDirection === 'asc' ? -1 : 1;
       if (valA > valB) return sortDirection === 'asc' ? 1 : -1;
-      return 0;
+
+      // Stable deterministic tie-breaker (IDM style):
+      // Prevents rows with identical status/values from randomly swapping or jumping around on updates
+      const timeA = new Date(a.created_at || a.last_try_at || 0).getTime();
+      const timeB = new Date(b.created_at || b.last_try_at || 0).getTime();
+      if (timeA !== timeB) return timeB - timeA; // newer first
+      return (a.id || '').localeCompare(b.id || '');
     });
 
     return list;
@@ -236,6 +258,50 @@
       );
     });
   });
+
+  // Virtual scrolling state for silky-smooth 60 FPS performance with 2,000+ downloads
+  let tableContainerEl = $state(null);
+  let scrollTop = $state(0);
+  let viewportHeight = $state(600);
+  const ROW_HEIGHT = 31;
+  const OVERSCAN = 15;
+
+  function handleTableScroll(e) {
+    scrollTop = e.currentTarget.scrollTop;
+    viewportHeight = e.currentTarget.clientHeight || 600;
+  }
+
+  // Flattened row list accounting for parent items and any expanded folder children
+  let flattenedRows = $derived.by(() => {
+    const rows = [];
+    for (const item of filteredDownloads) {
+      rows.push({ type: 'item', item, id: item.id });
+      if (item.is_folder && expandedFolderIds.includes(item.id) && item.folder_files && item.folder_files.length > 0) {
+        for (let ci = 0; ci < item.folder_files.length; ci++) {
+          const child = item.folder_files[ci];
+          rows.push({ type: 'child', parent: item, child, id: `${item.id}_child_${child.id || ci}`, index: ci });
+        }
+      }
+    }
+    return rows;
+  });
+
+  let totalRowCount = $derived(flattenedRows.length);
+  let isVirtual = $derived(totalRowCount > 60);
+
+  let startIndex = $derived(
+    isVirtual ? Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN) : 0
+  );
+  let endIndex = $derived(
+    isVirtual ? Math.min(totalRowCount, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN) : totalRowCount
+  );
+
+  let visibleRows = $derived(
+    isVirtual ? flattenedRows.slice(startIndex, endIndex) : flattenedRows
+  );
+
+  let topSpacerHeight = $derived(isVirtual ? startIndex * ROW_HEIGHT : 0);
+  let bottomSpacerHeight = $derived(isVirtual ? Math.max(0, (totalRowCount - endIndex) * ROW_HEIGHT) : 0);
 
   function toggleSort(column) {
     if (sortColumn === column) {
@@ -2160,6 +2226,17 @@
             <span class="dropdown-text">Reset Column Widths</span>
           </button>
           <div class="menu-divider"></div>
+          <button class="dropdown-item" onclick={() => { toggleHideCompleted(); closeMenus(); }}>
+            <span class="dropdown-icon">
+              {#if hideCompleted}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              {:else}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+              {/if}
+            </span>
+            <span class="dropdown-text">{hideCompleted ? 'Show Completed Downloads' : 'Hide Completed Downloads'}</span>
+          </button>
+          <div class="menu-divider"></div>
           <button class="dropdown-item" onclick={() => { activeFilter = 'all'; closeMenus(); }}>
             <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H4.99c-1.11 0-1.98.89-1.98 2L3 19c0 1.1.88 2 1.99 2H19c1.1 0 2-.9 2-2V5c0-1.11-.9-2-2-2zm0 12h-4c0 1.66-1.35 3-3 3s-3-1.34-3-3H4.99V5H19v10z"/></svg></span>
             <span class="dropdown-text">All Downloads ({counts.all})</span>
@@ -2424,6 +2501,29 @@
       {/if}
     </div>
 
+    <!-- Hide Completed Toggle Button -->
+    <button
+      type="button"
+      class="tb-btn toggle-hide-btn"
+      class:active={hideCompleted}
+      onclick={toggleHideCompleted}
+      title={hideCompleted ? 'Completed transfers hidden. Click to show all.' : 'Hide completed transfers to focus on active queue.'}
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        {#if hideCompleted}
+          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+          <line x1="1" y1="1" x2="23" y2="23"></line>
+        {:else}
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+          <circle cx="12" cy="3" r="3"></circle>
+        {/if}
+      </svg>
+      <span>{hideCompleted ? 'Completed Hidden' : 'Hide Completed'}</span>
+      {#if hideCompleted && counts.completed > 0}
+        <span class="tb-badge-count">{counts.completed}</span>
+      {/if}
+    </button>
+
     <!-- Search filter -->
     <div class="toolbar-search">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" stroke-width="2.5">
@@ -2458,7 +2558,7 @@
           onclick={() => activeFilter = 'all'}
         >
           <span class="cat-label">All Downloads</span>
-          <span class="cat-badge">{counts.all}</span>
+          <span class="cat-badge">{hideCompleted && activeFilter === 'all' ? `${filteredDownloads.length}/${counts.all}` : counts.all}</span>
         </button>
 
         <button
@@ -2575,7 +2675,7 @@
           <span>{bulkAddingStatus}</span>
         </div>
       {/if}
-      <div class="table-container">
+      <div class="table-container" bind:this={tableContainerEl} onscroll={handleTableScroll}>
         <table class="torrent-table">
           <colgroup>
             <col style="width: {colWidths.name}px;" />
@@ -2709,7 +2809,7 @@
             </tr>
           </thead>
           <tbody>
-            {#if filteredDownloads.length === 0}
+            {#if totalRowCount === 0}
               <tr class="empty-row" onclick={() => { selectedIds = []; lastClickedId = null; }}>
                 <td colspan="9">
                   <div class="table-empty">
@@ -2718,161 +2818,167 @@
                 </td>
               </tr>
             {:else}
-              {#each filteredDownloads as item (item.id)}
-                <tr
-                  class="torrent-row"
-                  class:selected={selectedIds.includes(item.id)}
-                  class:row-corrupt={item.status === 'corrupted'}
-                  onclick={(e) => handleRowClick(item, e)}
-                  oncontextmenu={(e) => handleContextMenu(item, e)}
-                >
-                  <td class="col-name" title={item.filename || item.url}>
-                    <div class="name-cell">
-                      {#if item.is_folder}
-                        <button
-                          type="button"
-                          class="folder-expand-toggle"
-                          class:expanded={expandedFolderIds.includes(item.id)}
-                          onclick={(e) => toggleExpandFolder(item.id, e)}
-                          title={expandedFolderIds.includes(item.id) ? "Collapse folder files" : "Expand to view files"}
-                        >
-                          <span class="folder-arrow">{expandedFolderIds.includes(item.id) ? '▼' : '▶'}</span>
-                          {#if item.total_files}
-                            <span class="folder-file-badge">{item.total_files}</span>
-                          {/if}
-                        </button>
-                      {/if}
-                      {#if item.url && (item.url.includes('cdn.discordapp.com') || item.url.includes('media.discordapp.net'))}
-                        <span class="discord-tag" title="Discord CDN Attachment">DISCORD</span>
-                      {/if}
-                      <span class="file-text">{item.filename || 'Resolving name...'}</span>
-                    </div>
-                  </td>
-                  <td class="col-size font-mono">{getItemSize(item)}</td>
-                  <td class="col-done font-mono">{formatBytes(item.downloaded_bytes)}</td>
-                  <td class="col-prog" style="width: {colWidths.prog}px; max-width: {colWidths.prog}px;">
-                    <div class="progress-cell" title={item.status === 'moving' ? `Moving file: ${(item.move_progress || 0).toFixed(1)}%` : item.status === 'compressing' ? `Compressing ZIP: ${(item.compression_progress || 0).toFixed(1)}%` : (item.is_folder && item.total_files ? `${(item.percentage || 0).toFixed(1)}% (${item.completed_files || 0} of ${item.total_files} files)` : `${(item.percentage || (item.status === 'completed' || item.status === 'corrupted' ? 100 : 0)).toFixed(1)}%`)}>
-                      <div class="native-progress-track">
-                        <div
-                          class="native-progress-fill"
-                          class:prog-done={item.status === 'completed'}
-                          class:prog-corrupt={item.status === 'corrupted'}
-                          class:prog-paused={item.status === 'paused'}
-                          class:prog-error={item.status === 'failed'}
-                          class:prog-compressing={item.status === 'compressing'}
-                          class:prog-moving={item.status === 'moving'}
-                          style="width: {item.status === 'moving' ? (item.move_progress || 0) : item.status === 'compressing' ? (item.compression_progress || 0) : (item.percentage || (item.status === 'completed' || item.status === 'corrupted' ? 100 : 0))}%"
-                        ></div>
-                      </div>
-                      <span class="prog-label font-mono">
-                        {#if item.status === 'moving'}
-                          {(item.move_progress || 0).toFixed(0)}% (Moving)
-                        {:else if item.status === 'compressing'}
-                          {colWidths.prog >= 130 ? `${(item.compression_progress || item.percentage || 0).toFixed(0)}% (ZIP)` : `${(item.compression_progress || item.percentage || 0).toFixed(0)}%`}
-                        {:else if item.is_folder && item.total_files}
-                          {#if colWidths.prog >= 150}
-                            {(item.percentage || 0).toFixed(0)}% ({item.completed_files || 0}/{item.total_files})
-                          {:else if colWidths.prog >= 115}
-                            {(item.percentage || 0).toFixed(0)}% [{item.completed_files || 0}/{item.total_files}]
-                          {:else}
-                            {(item.percentage || 0).toFixed(0)}%
-                          {/if}
-                        {:else}
-                          {(item.percentage || (item.status === 'completed' || item.status === 'corrupted' ? 100 : 0)).toFixed(colWidths.prog >= 110 ? 1 : 0)}%
+              {#if topSpacerHeight > 0}
+                <tr class="spacer-row" style="height: {topSpacerHeight}px;"><td colspan="9" style="height: {topSpacerHeight}px; padding: 0; border: none;"></td></tr>
+              {/if}
+              {#each visibleRows as row (row.id)}
+                {#if row.type === 'item'}
+                  {@const item = row.item}
+                  <tr
+                    class="torrent-row"
+                    class:selected={selectedIds.includes(item.id)}
+                    class:row-corrupt={item.status === 'corrupted'}
+                    onclick={(e) => handleRowClick(item, e)}
+                    oncontextmenu={(e) => handleContextMenu(item, e)}
+                  >
+                    <td class="col-name" title={item.filename || item.url}>
+                      <div class="name-cell">
+                        {#if item.is_folder}
+                          <button
+                            type="button"
+                            class="folder-expand-toggle"
+                            class:expanded={expandedFolderIds.includes(item.id)}
+                            onclick={(e) => toggleExpandFolder(item.id, e)}
+                            title={expandedFolderIds.includes(item.id) ? "Collapse folder files" : "Expand to view files"}
+                          >
+                            <span class="folder-arrow">{expandedFolderIds.includes(item.id) ? '▼' : '▶'}</span>
+                            {#if item.total_files}
+                              <span class="folder-file-badge">{item.total_files}</span>
+                            {/if}
+                          </button>
                         {/if}
-                      </span>
-                    </div>
-                  </td>
-                  <td class="col-status">
-                    {#if item.status === 'corrupted'}
-                      <span class="status-tag status-corrupted" title={item.error}>
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 3px; vertical-align: middle;">
-                          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
-                          <line x1="12" y1="9" x2="12" y2="13"></line>
-                          <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                        </svg>CORRUPTED</span>
-                    {:else if item.status === 'missing'}
-                      <span class="status-tag status-missing" title={item.error || 'File might be deleted or moved'}>
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 3px; vertical-align: middle;">
-                          <circle cx="12" cy="12" r="10"></circle>
-                          <line x1="12" y1="8" x2="12" y2="12"></line>
-                          <line x1="12" y1="16" x2="12.01" y2="16"></line>
-                        </svg>MISSING / MOVED</span>
-                    {:else if item.status === 'compressing'}
-                      <span class="status-tag status-compressing" title="Compressing into ZIP archive">
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 3px; vertical-align: middle;">
-                          <polyline points="21 8 21 21 3 21 3 8"></polyline>
-                          <rect x="1" y="3" width="22" height="5"></rect>
-                          <line x1="10" y1="12" x2="14" y2="12"></line>
-                        </svg>COMPRESSING</span>
-                    {:else if item.status === 'moving'}
-                      <span class="status-tag status-moving" title="Moving file across disks/folders">
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 3px; vertical-align: middle;">
-                          <path d="M5 12h14"></path>
-                          <path d="M12 5l7 7-7 7"></path>
-                        </svg>MOVING ({(item.move_progress || 0).toFixed(0)}%)</span>
-                    {:else}
-                      <span class="status-tag status-{item.status}">{item.status}</span>
-                      {#if item.status === 'downloading' && item.chunks && item.chunks > 1}
-                        <span class="chunks-badge" title="{item.chunks} Parallel Streams (Multi-Chunk / IDM Style)">{item.chunks} Chunks</span>
-                      {/if}
-                    {/if}
-                  </td>
-                  <td class="col-speed font-mono">
-                    {item.status === 'downloading' || item.status === 'moving' ? formatSpeed(item.speed) : '--'}
-                  </td>
-                  <td class="col-eta font-mono">
-                    {item.status === 'downloading' ? formatTime(item.eta_seconds) : '--'}
-                  </td>
-                  <td class="col-path" title={item.target_folder}>
-                    {item.target_folder}
-                  </td>
-                  <td class="col-added font-mono" title="Added: {formatDateTime(item.created_at)} | Last Try: {formatDateTime(item.last_try_at)}">
-                    {formatDateTime(item.last_try_at || item.created_at)}
-                  </td>
-                </tr>
-
-                {#if item.is_folder && expandedFolderIds.includes(item.id) && item.folder_files && item.folder_files.length > 0}
-                  {#each item.folder_files as child, ci (child.id || ci)}
-                    <tr class="child-file-row">
-                      <td class="col-name" title={child.filename}>
-                        <div class="child-name-cell">
-                          <span class="tree-line">└─</span>
-                          <span class="child-filename">{child.filename}</span>
+                        {#if item.url && (item.url.includes('cdn.discordapp.com') || item.url.includes('media.discordapp.net'))}
+                          <span class="discord-tag" title="Discord CDN Attachment">DISCORD</span>
+                        {/if}
+                        <span class="file-text">{item.filename || 'Resolving name...'}</span>
+                      </div>
+                    </td>
+                    <td class="col-size font-mono">{getItemSize(item)}</td>
+                    <td class="col-done font-mono">{formatBytes(item.downloaded_bytes)}</td>
+                    <td class="col-prog" style="width: {colWidths.prog}px; max-width: {colWidths.prog}px;">
+                      <div class="progress-cell" title={item.status === 'moving' ? `Moving file: ${(item.move_progress || 0).toFixed(1)}%` : item.status === 'compressing' ? `Compressing ZIP: ${(item.compression_progress || 0).toFixed(1)}%` : (item.is_folder && item.total_files ? `${(item.percentage || 0).toFixed(1)}% (${item.completed_files || 0} of ${item.total_files} files)` : `${(item.percentage || (item.status === 'completed' || item.status === 'corrupted' ? 100 : 0)).toFixed(1)}%`)}>
+                        <div class="native-progress-track">
+                          <div
+                            class="native-progress-fill"
+                            class:prog-done={item.status === 'completed'}
+                            class:prog-corrupt={item.status === 'corrupted'}
+                            class:prog-paused={item.status === 'paused'}
+                            class:prog-error={item.status === 'failed'}
+                            class:prog-compressing={item.status === 'compressing'}
+                            class:prog-moving={item.status === 'moving'}
+                            style="width: {item.status === 'moving' ? (item.move_progress || 0) : item.status === 'compressing' ? (item.compression_progress || 0) : (item.percentage || (item.status === 'completed' || item.status === 'corrupted' ? 100 : 0))}%"
+                          ></div>
                         </div>
-                      </td>
-                      <td class="col-size font-mono">{child.size ? formatBytes(child.size) : '--'}</td>
-                      <td class="col-done font-mono">{child.status === 'completed' && child.size ? formatBytes(child.size) : '--'}</td>
-                      <td class="col-prog" style="width: {colWidths.prog}px; max-width: {colWidths.prog}px;">
-                        <div class="child-prog-wrap" title="{child.status === 'completed' ? '100% Completed' : (child.status === 'downloading' ? 'Active downloading' : 'Pending')}">
-                          <div class="native-progress-track">
-                            <div
-                              class="native-progress-fill"
-                              class:prog-done={child.status === 'completed'}
-                              class:prog-active={child.status === 'downloading'}
-                              style="width: {child.status === 'completed' ? 100 : (child.status === 'downloading' ? 65 : 0)}%"
-                            ></div>
-                          </div>
-                          <span class="child-prog-text font-mono">
-                            {child.status === 'completed' ? '100%' : (child.status === 'downloading' ? (colWidths.prog >= 120 ? 'Active' : '...') : '0%')}
-                          </span>
-                        </div>
-                      </td>
-                      <td class="col-status">
-                        <span class="child-status-pill child-status-{child.status}">
-                          {child.status.toUpperCase()}
+                        <span class="prog-label font-mono">
+                          {#if item.status === 'moving'}
+                            {(item.move_progress || 0).toFixed(0)}% (Moving)
+                          {:else if item.status === 'compressing'}
+                            {colWidths.prog >= 130 ? `${(item.compression_progress || item.percentage || 0).toFixed(0)}% (ZIP)` : `${(item.compression_progress || item.percentage || 0).toFixed(0)}%`}
+                          {:else if item.is_folder && item.total_files}
+                            {#if colWidths.prog >= 150}
+                              {(item.percentage || 0).toFixed(0)}% ({item.completed_files || 0}/{item.total_files})
+                            {:else if colWidths.prog >= 115}
+                              {(item.percentage || 0).toFixed(0)}% [{item.completed_files || 0}/{item.total_files}]
+                            {:else}
+                              {(item.percentage || 0).toFixed(0)}%
+                            {/if}
+                          {:else}
+                            {(item.percentage || (item.status === 'completed' || item.status === 'corrupted' ? 100 : 0)).toFixed(colWidths.prog >= 110 ? 1 : 0)}%
+                          {/if}
                         </span>
-                      </td>
-                      <td class="col-speed font-mono">--</td>
-                      <td class="col-eta font-mono">--</td>
-                      <td class="col-path font-mono">
-                        <span class="in-archive-label">↳ Inside Archive</span>
-                      </td>
-                      <td class="col-added font-mono">--</td>
-                    </tr>
-                  {/each}
+                      </div>
+                    </td>
+                    <td class="col-status">
+                      {#if item.status === 'corrupted'}
+                        <span class="status-tag status-corrupted" title={item.error}>
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 3px; vertical-align: middle;">
+                            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                            <line x1="12" y1="9" x2="12" y2="13"></line>
+                            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                          </svg>CORRUPTED</span>
+                      {:else if item.status === 'missing'}
+                        <span class="status-tag status-missing" title={item.error || 'File might be deleted or moved'}>
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 3px; vertical-align: middle;">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <line x1="12" y1="8" x2="12" y2="12"></line>
+                            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                          </svg>MISSING / MOVED</span>
+                      {:else if item.status === 'compressing'}
+                        <span class="status-tag status-compressing" title="Compressing into ZIP archive">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 3px; vertical-align: middle;">
+                            <polyline points="21 8 21 21 3 21 3 8"></polyline>
+                            <rect x="1" y="3" width="22" height="5"></rect>
+                            <line x1="10" y1="12" x2="14" y2="12"></line>
+                          </svg>COMPRESSING</span>
+                      {:else if item.status === 'moving'}
+                        <span class="status-tag status-moving" title="Moving file across disks/folders">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 3px; vertical-align: middle;">
+                            <path d="M5 12h14"></path>
+                            <path d="M12 5l7 7-7 7"></path>
+                          </svg>MOVING ({(item.move_progress || 0).toFixed(0)}%)</span>
+                      {:else}
+                        <span class="status-tag status-{item.status}">{item.status}</span>
+                        {#if item.status === 'downloading' && item.chunks && item.chunks > 1}
+                          <span class="chunks-badge" title="{item.chunks} Parallel Streams (Multi-Chunk / IDM Style)">{item.chunks} Chunks</span>
+                        {/if}
+                      {/if}
+                    </td>
+                    <td class="col-speed font-mono">
+                      {item.status === 'downloading' || item.status === 'moving' ? formatSpeed(item.speed) : '--'}
+                    </td>
+                    <td class="col-eta font-mono">
+                      {item.status === 'downloading' ? formatTime(item.eta_seconds) : '--'}
+                    </td>
+                    <td class="col-path" title={item.target_folder}>
+                      {item.target_folder}
+                    </td>
+                    <td class="col-added font-mono" title="Added: {formatDateTime(item.created_at)} | Last Try: {formatDateTime(item.last_try_at)}">
+                      {formatDateTime(item.last_try_at || item.created_at)}
+                    </td>
+                  </tr>
+                {:else if row.type === 'child'}
+                  {@const child = row.child}
+                  <tr class="child-file-row">
+                    <td class="col-name" title={child.filename}>
+                      <div class="child-name-cell">
+                        <span class="tree-line">└─</span>
+                        <span class="child-filename">{child.filename}</span>
+                      </div>
+                    </td>
+                    <td class="col-size font-mono">{child.size ? formatBytes(child.size) : '--'}</td>
+                    <td class="col-done font-mono">{child.status === 'completed' && child.size ? formatBytes(child.size) : '--'}</td>
+                    <td class="col-prog" style="width: {colWidths.prog}px; max-width: {colWidths.prog}px;">
+                      <div class="child-prog-wrap" title="{child.status === 'completed' ? '100% Completed' : (child.status === 'downloading' ? 'Active downloading' : 'Pending')}">
+                        <div class="native-progress-track">
+                          <div
+                            class="native-progress-fill"
+                            class:prog-done={child.status === 'completed'}
+                            class:prog-active={child.status === 'downloading'}
+                            style="width: {child.status === 'completed' ? 100 : (child.status === 'downloading' ? 65 : 0)}%"
+                          ></div>
+                        </div>
+                        <span class="child-prog-text font-mono">
+                          {child.status === 'completed' ? '100%' : (child.status === 'downloading' ? (colWidths.prog >= 120 ? 'Active' : '...') : '0%')}
+                        </span>
+                      </div>
+                    </td>
+                    <td class="col-status">
+                      <span class="child-status-pill child-status-{child.status}">
+                        {child.status.toUpperCase()}
+                      </span>
+                    </td>
+                    <td class="col-speed font-mono">--</td>
+                    <td class="col-eta font-mono">--</td>
+                    <td class="col-path font-mono">
+                      <span class="in-archive-label">↳ Inside Archive</span>
+                    </td>
+                    <td class="col-added font-mono">--</td>
+                  </tr>
                 {/if}
               {/each}
+              {#if bottomSpacerHeight > 0}
+                <tr class="spacer-row" style="height: {bottomSpacerHeight}px;"><td colspan="9" style="height: {bottomSpacerHeight}px; padding: 0; border: none;"></td></tr>
+              {/if}
             {/if}
           </tbody>
         </table>
@@ -4866,6 +4972,19 @@ Or paste AI scraper JSON array:
   .tb-btn-primary:hover {
     opacity: 0.9;
   }
+  .toggle-hide-btn.active {
+    background: rgba(56, 139, 253, 0.18);
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
+    font-weight: 600;
+  }
+  .tb-badge-count {
+    background: rgba(255, 255, 255, 0.16);
+    border-radius: 10px;
+    padding: 0.05rem 0.4rem;
+    font-size: 0.7rem;
+    font-family: var(--font-mono);
+  }
   .tb-separator {
     width: 1px;
     height: 22px;
@@ -5072,6 +5191,16 @@ Or paste AI scraper JSON array:
   }
   .col-resizer:hover {
     background: var(--resizer-hover);
+  }
+
+  .spacer-row {
+    pointer-events: none;
+    background: transparent !important;
+    border: none !important;
+  }
+  .spacer-row td {
+    border: none !important;
+    padding: 0 !important;
   }
 
   .torrent-row {

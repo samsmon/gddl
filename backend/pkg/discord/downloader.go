@@ -294,6 +294,76 @@ func (d *Downloader) Download(
 	destPath := filepath.Join(targetFolder, filename)
 	partPath := destPath + ".part"
 
+	// Fast probe for remote size and accurate Content-Disposition filename
+	remoteName, remoteSize, headErr := d.GetFileInfo(ctx, rawURL)
+	if headErr == nil && remoteName != "" && (len(desiredFilename) == 0 || desiredFilename[0] == "") {
+		filename = remoteName
+		destPath = filepath.Join(targetFolder, filename)
+		partPath = destPath + ".part"
+	}
+
+	// 1. Check if destination file already exists and is fully downloaded
+	if remoteSize > 0 {
+		if fi, err := os.Stat(destPath); err == nil && fi.Size() == remoteSize {
+			logger.Infof("Discord", "File '%s' already fully downloaded (%d bytes)", filename, remoteSize)
+			if onProgress != nil {
+				onProgress(remoteSize, remoteSize, 0, 0, 100)
+			}
+			return filename, remoteSize, nil
+		}
+		if fi, err := os.Stat(partPath); err == nil && fi.Size() == remoteSize {
+			logger.Infof("Discord", "File '%s' .part is already complete (%d bytes), finalizing...", filename, remoteSize)
+			if err := finalizeDownloadedFile(partPath, destPath, remoteSize); err == nil {
+				if onProgress != nil {
+					onProgress(remoteSize, remoteSize, 0, 0, 100)
+				}
+				return filename, remoteSize, nil
+			}
+		}
+	}
+
+	chunks := d.GetChunksPerDownload()
+	useChunks := chunks > 1 && remoteSize >= 10*1024*1024
+
+	// 2. IDM-style parallel multi-socket download for large attachments
+	if useChunks {
+		logger.Infof("Discord", "Downloading '%s' (%d bytes) with %d parallel HTTP/1.1 chunk streams (IDM-style)", filename, remoteSize, chunks)
+		headers := http.Header{}
+		applyBrowserHeadersToHeader(headers)
+
+		copied, dlErr := d.chunkedDownloader.DownloadSegmented(
+			ctx,
+			partPath,
+			rawURL,
+			remoteSize,
+			headers,
+			chunks,
+			onProgress,
+		)
+
+		if dlErr == nil {
+			if err := finalizeDownloadedFile(partPath, destPath, remoteSize); err != nil {
+				return filename, copied, fmt.Errorf("failed to finalize downloaded file: %w", err)
+			}
+			if onProgress != nil {
+				onProgress(remoteSize, remoteSize, 0, 0, 100)
+			}
+			logger.Successf("Discord", "Saved '%s' successfully (%d bytes) via %d streams", filename, remoteSize, chunks)
+			return filename, remoteSize, nil
+		}
+
+		if ctx.Err() != nil || strings.Contains(dlErr.Error(), "context canceled") {
+			return filename, copied, ctx.Err()
+		}
+
+		if strings.Contains(dlErr.Error(), "expired") || strings.Contains(dlErr.Error(), "HTTP 401") || strings.Contains(dlErr.Error(), "HTTP 403") {
+			return filename, copied, dlErr
+		}
+
+		logger.Warnf("Discord", "Chunked download for '%s' encountered error: %v. Falling back to single-stream download with resume...", filename, dlErr)
+		chunked.RemoveChunkMeta(partPath)
+	}
+
 	var existingBytes int64 = 0
 	if fi, err := os.Stat(partPath); err == nil {
 		existingBytes = fi.Size()

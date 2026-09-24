@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -160,10 +161,74 @@ func saveChunkState(destPath string, totalSize int64, segments []*ChunkSegment) 
 	return os.Rename(tmpFile, metaFile)
 }
 
-// DownloadSegmented downloads a file in parallel chunks using HTTP Range requests.
-// Supports resuming from prior .gddl-chunks state, or partitioning remaining bytes
-// if destPath already contains partial contiguous data.
+// DownloadSegmented downloads a file in parallel chunks using HTTP Range requests with
+// automatic self-healing, staggered socket connection (IDM-style), and state resumption.
 func (d *Downloader) DownloadSegmented(
+	ctx context.Context,
+	destPath string,
+	downloadURL string,
+	totalSize int64,
+	headers http.Header,
+	numChunks int,
+	onProgress ProgressCallback,
+) (int64, error) {
+	// Auto-healing loop:
+	// Attempt 1: Standard / resumed multi-chunk transfer
+	// Attempt 2: Auto-heal resume of remaining incomplete chunks
+	// Attempt 3: Clean auto-heal wipe (clears .gddl-chunks and restarts fresh from 0)
+	maxHealAttempts := 3
+	var lastErr error
+	var finalDownloaded int64
+
+	for healAttempt := 1; healAttempt <= maxHealAttempts; healAttempt++ {
+		if ctx.Err() != nil {
+			return finalDownloaded, ctx.Err()
+		}
+
+		finalDownloaded, lastErr = d.downloadSegmentedOnce(
+			ctx,
+			destPath,
+			downloadURL,
+			totalSize,
+			headers,
+			numChunks,
+			onProgress,
+		)
+
+		if lastErr == nil {
+			return finalDownloaded, nil
+		}
+
+		// Don't auto-heal if user manually paused or cancelled
+		if ctx.Err() != nil || errors.Is(lastErr, context.Canceled) {
+			return finalDownloaded, ctx.Err()
+		}
+
+		// Don't auto-heal if server doesn't support Range requests (caller should fall back to single stream)
+		if strings.Contains(lastErr.Error(), "does not support HTTP Range requests") {
+			return finalDownloaded, lastErr
+		}
+
+		// Don't auto-heal if link has expired
+		if strings.Contains(lastErr.Error(), "expired") || strings.Contains(lastErr.Error(), "HTTP 401") || strings.Contains(lastErr.Error(), "HTTP 403") {
+			return finalDownloaded, lastErr
+		}
+
+		if healAttempt == 1 {
+			logger.Warnf("Chunked", "Segment transfer error on '%s': %v. Auto-healing (1/2): retrying incomplete chunks...", filepath.Base(destPath), lastErr)
+			time.Sleep(1 * time.Second)
+		} else if healAttempt == 2 {
+			logger.Warnf("Chunked", "Segment transfer error persisted on '%s': %v. Auto-healing (2/2): clearing corrupt chunk state and restarting cleanly from byte 0...", filepath.Base(destPath), lastErr)
+			RemoveChunkMeta(destPath)
+			_ = os.Remove(destPath)
+			time.Sleep(1500 * time.Millisecond)
+		}
+	}
+
+	return finalDownloaded, lastErr
+}
+
+func (d *Downloader) downloadSegmentedOnce(
 	ctx context.Context,
 	destPath string,
 	downloadURL string,
@@ -340,6 +405,18 @@ func (d *Downloader) DownloadSegmented(
 		go func(s *ChunkSegment) {
 			defer wg.Done()
 
+			// IDM-style staggered socket startup:
+			// Introduce a small delay (80ms per stream index) so parallel TCP handshakes
+			// do not trigger Cloudflare / CDN burst rate limiting
+			if s.Index > 0 {
+				select {
+				case <-ctx.Done():
+					setErr(ctx.Err())
+					return
+				case <-time.After(time.Duration(s.Index*80) * time.Millisecond):
+				}
+			}
+
 			maxRetries := 5
 			backoff := time.Second
 
@@ -503,3 +580,4 @@ func (d *Downloader) DownloadSegmented(
 
 	return finalDownloaded, nil
 }
+

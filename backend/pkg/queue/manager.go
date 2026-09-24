@@ -73,6 +73,7 @@ type DownloadItem struct {
 	CreatedAt       time.Time      `json:"created_at"`
 	LastTryAt       time.Time      `json:"last_try_at"`
 	Chunks          int            `json:"chunks,omitempty"`
+	AutoRetryCount  int            `json:"auto_retry_count,omitempty"`
 
 	// Folder support
 	IsFolder            bool                    `json:"is_folder"`
@@ -124,6 +125,7 @@ func (it *DownloadItem) Snapshot() DownloadItem {
 		MoveProgress:        it.MoveProgress,
 		FolderFiles:         childFiles,
 		Chunks:              it.Chunks,
+		AutoRetryCount:      it.AutoRetryCount,
 	}
 }
 
@@ -404,8 +406,9 @@ func (m *Manager) worker() {
 
 		if discord.IsDiscordURL(item.URL) {
 			item.mu.Lock()
-			item.Chunks = 1
+			item.Chunks = configuredChunks
 			item.mu.Unlock()
+			m.discordDownloader.SetChunksPerDownload(configuredChunks)
 			filename, _, err = m.discordDownloader.Download(
 				ctx,
 				item.URL,
@@ -417,7 +420,11 @@ func (m *Manager) worker() {
 					item.Speed = speed
 					item.ETASeconds = etaSeconds
 					item.Percentage = percentage
-					item.Chunks = 1
+					if totalBytes > 0 && totalBytes <= 10*1024*1024 {
+						item.Chunks = 1
+					} else {
+						item.Chunks = configuredChunks
+					}
 					item.mu.Unlock()
 				},
 				desiredName,
@@ -458,15 +465,43 @@ func (m *Manager) worker() {
 					item.Status = StatusCancelled
 				}
 				logger.Warnf("Queue", "Download cancelled for '%s'", displayName)
-			} else if strings.HasPrefix(err.Error(), "CORRUPT:") {
-				item.Status = StatusCorrupted
-				item.Error = strings.TrimSpace(strings.TrimPrefix(err.Error(), "CORRUPT:"))
-				item.Filename = filename
-				logger.Errorf("Integrity", "Download corrupted for '%s': %s", displayName, item.Error)
 			} else {
-				item.Status = StatusFailed
-				item.Error = err.Error()
-				logger.Errorf("Queue", "Download failed for '%s': %v", displayName, err)
+				// Automatic self-healing for corrupted downloads, EOF, or broken chunk streams:
+				isCorrupt := strings.HasPrefix(err.Error(), "CORRUPT:")
+				isStreamErr := strings.Contains(err.Error(), "INTERNAL_ERROR") || strings.Contains(err.Error(), "stream error") || strings.Contains(err.Error(), "connection reset") || strings.Contains(err.Error(), "unexpected EOF")
+				if item.AutoRetryCount < 1 && (isCorrupt || isStreamErr) && ctx.Err() == nil {
+					item.AutoRetryCount++
+					logger.Warnf("Queue", "Download '%s' encountered error: %v. Initiating automatic self-healing restart (attempt %d/1)...", displayName, err, item.AutoRetryCount)
+					// Clean partial files and chunk states on disk
+					if item.Filename != "" {
+						_ = os.Remove(filepath.Join(item.TargetFolder, item.Filename))
+						_ = os.Remove(filepath.Join(item.TargetFolder, item.Filename+".part"))
+						_ = os.Remove(filepath.Join(item.TargetFolder, item.Filename+".part.gddl-chunks"))
+						_ = os.Remove(filepath.Join(item.TargetFolder, item.Filename+".gddl-chunks"))
+					}
+					item.Status = StatusQueued
+					item.Error = ""
+					item.Speed = 0
+					item.DownloadedBytes = 0
+					item.Percentage = 0
+					item.LastTryAt = time.Now()
+					item.mu.Unlock()
+					m.queueChan <- item
+					m.triggerBroadcast()
+					m.saveToDisk()
+					continue
+				}
+
+				if isCorrupt {
+					item.Status = StatusCorrupted
+					item.Error = strings.TrimSpace(strings.TrimPrefix(err.Error(), "CORRUPT:"))
+					item.Filename = filename
+					logger.Errorf("Integrity", "Download corrupted for '%s': %s", displayName, item.Error)
+				} else {
+					item.Status = StatusFailed
+					item.Error = err.Error()
+					logger.Errorf("Queue", "Download failed for '%s': %v", displayName, err)
+				}
 			}
 			item.Speed = 0
 			item.ETASeconds = 0
