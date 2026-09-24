@@ -82,6 +82,17 @@
   let deleteModalSingleId = $state(null);
   let deleteModalWithFile = $state(false);
 
+  // Discord Links Management state
+  let showDiscordExportModal = $state(false);
+  let showDiscordRefreshModal = $state(false);
+  let unfinishedDiscordItems = $state([]);
+  let isFetchingDiscord = $state(false);
+  let discordExportFormat = $state('json'); // 'json', 'urls', 'detailed'
+  let discordExportCopied = $state(false);
+  let discordRefreshInput = $state('');
+  let isRefreshingDiscord = $state(false);
+  let discordRefreshResult = $state(null);
+
   // Conflict / Duplicate Resolution state
   let showConflictModal = $state(false);
   let conflictList = $state([]);
@@ -1123,6 +1134,136 @@
     }
   }
 
+  async function openDiscordExportModal() {
+    showDiscordExportModal = true;
+    discordExportCopied = false;
+    await fetchUnfinishedDiscord();
+  }
+
+  async function fetchUnfinishedDiscord() {
+    isFetchingDiscord = true;
+    try {
+      const res = await fetch('/api/discord/unfinished');
+      if (res.ok) {
+        unfinishedDiscordItems = (await res.json()) || [];
+      } else {
+        console.error('Failed to fetch unfinished discord items');
+      }
+    } catch (e) {
+      console.error('Error fetching unfinished discord items:', e);
+    } finally {
+      isFetchingDiscord = false;
+    }
+  }
+
+  let formattedDiscordExportText = $derived.by(() => {
+    if (!unfinishedDiscordItems || unfinishedDiscordItems.length === 0) {
+      return '';
+    }
+    if (discordExportFormat === 'urls') {
+      return unfinishedDiscordItems.map(i => i.url).join('\n');
+    }
+    if (discordExportFormat === 'detailed') {
+      return unfinishedDiscordItems.map(i => 
+        `Filename: ${i.filename}\nChannel ID: ${i.channel_id || '-'}\nAttachment ID: ${i.attachment_id || '-'}\nStatus: ${i.status}\nError: ${i.error || 'None'}\nURL: ${i.url}\n`
+      ).join('\n----------------------------------------\n');
+    }
+    // Default: Clean formatted JSON designed for AI agents / scrapers
+    return JSON.stringify(unfinishedDiscordItems, null, 2);
+  });
+
+  function copyDiscordExport() {
+    if (!formattedDiscordExportText) return;
+    if (navigator.clipboard && window.isSecureContext && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(formattedDiscordExportText).then(() => {
+        discordExportCopied = true;
+        setTimeout(() => discordExportCopied = false, 2000);
+      }).catch(() => fallbackCopyDiscordExport(formattedDiscordExportText));
+    } else {
+      fallbackCopyDiscordExport(formattedDiscordExportText);
+    }
+  }
+
+  function fallbackCopyDiscordExport(text) {
+    try {
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-9999px';
+      textArea.style.top = '0';
+      textArea.style.opacity = '0';
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      const success = document.execCommand('copy');
+      document.body.removeChild(textArea);
+      if (success) {
+        discordExportCopied = true;
+        setTimeout(() => discordExportCopied = false, 2000);
+      }
+    } catch (err) {
+      console.error('Fallback copy failed', err);
+    }
+  }
+
+  function downloadDiscordExport(format) {
+    if (!formattedDiscordExportText) return;
+    const isJson = format === 'json';
+    const filename = isJson ? 'unfinished_discord_downloads.json' : 'unfinished_discord_urls.txt';
+    const mime = isJson ? 'application/json' : 'text/plain';
+    const blob = new Blob([formattedDiscordExportText], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function openDiscordRefreshModal() {
+    discordRefreshResult = null;
+    showDiscordRefreshModal = true;
+  }
+
+  async function submitRefreshDiscordURLs() {
+    if (!discordRefreshInput.trim()) return;
+    isRefreshingDiscord = true;
+    discordRefreshResult = null;
+
+    try {
+      const res = await fetch('/api/discord/refresh-urls', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw: discordRefreshInput.trim() })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        discordRefreshResult = {
+          success: true,
+          message: `Updated ${data.updated} item(s)! Downloads have resumed.`,
+          updated: data.updated,
+          not_found: data.not_found,
+          total: data.total_urls
+        };
+        fetchDownloads();
+      } else {
+        discordRefreshResult = {
+          success: false,
+          message: data.error || 'Failed to update Discord URLs'
+        };
+      }
+    } catch (err) {
+      discordRefreshResult = {
+        success: false,
+        message: 'Network or server error while updating URLs: ' + err.message
+      };
+    } finally {
+      isRefreshingDiscord = false;
+    }
+  }
+
   async function fetchDownloads() {
     if (authEnabled && !isAuthenticated) return;
     try {
@@ -1753,6 +1894,14 @@
         showLogsModal = false;
         return;
       }
+      if (showDiscordExportModal) {
+        showDiscordExportModal = false;
+        return;
+      }
+      if (showDiscordRefreshModal) {
+        showDiscordRefreshModal = false;
+        return;
+      }
       selectedIds = [];
       lastClickedId = null;
       return;
@@ -2052,6 +2201,15 @@
             <span class="dropdown-text">Verify File Integrity & Disk Check</span>
           </button>
           <div class="menu-divider"></div>
+          <button class="dropdown-item" onclick={() => { openDiscordExportModal(); closeMenus(); }}>
+            <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg></span>
+            <span class="dropdown-text">Export Discord Downloads (AI Agent)...</span>
+          </button>
+          <button class="dropdown-item" onclick={() => { openDiscordRefreshModal(); closeMenus(); }}>
+            <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg></span>
+            <span class="dropdown-text">Refresh Discord Links...</span>
+          </button>
+          <div class="menu-divider"></div>
           <button class="dropdown-item" onclick={() => { openLogsModal(); closeMenus(); }}>
             <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg></span>
             <span class="dropdown-text">Execution & Error Logs...</span>
@@ -2190,6 +2348,14 @@
         {#if oauthConnected || hasLogin}
           <span class="auth-dot"></span>
         {/if}
+      </button>
+
+      <!-- Discord Links Refresh & Export -->
+      <button class="tb-btn" onclick={openDiscordRefreshModal} title="Refresh expired Discord CDN links & resume downloads">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+        </svg>
+        <span>Refresh Discord</span>
       </button>
 
       <!-- Options -->
@@ -2907,6 +3073,13 @@
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="vertical-align: middle; margin-right: 4px;">
                         <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l6 5.67"/>
                       </svg>Reset Cooldown & Retry
+                    </button>
+                  {/if}
+                  {#if selectedItem.url && (selectedItem.url.includes('discordapp.com') || selectedItem.url.includes('discordapp.net'))}
+                    <button class="btn-mini btn-action" onclick={openDiscordRefreshModal} style="white-space: nowrap;" title="Paste fresh Discord CDN URL">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="vertical-align: middle; margin-right: 4px;">
+                        <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+                      </svg>Refresh Link
                     </button>
                   {/if}
                   <button class="btn-mini btn-secondary" onclick={() => openLogsModal('ERROR')} style="white-space: nowrap;">
@@ -4353,6 +4526,224 @@
             Displaying {filteredLogs.length} of {logs.length} entries • In-memory buffer: last 500 actions
           </span>
           <button class="btn btn-primary" onclick={() => showLogsModal = false}>Close</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Modal: Export Unfinished Discord Downloads (AI Agent Scraper) -->
+  {#if showDiscordExportModal}
+    <div class="modal-overlay" role="presentation" onclick={() => showDiscordExportModal = false} onkeydown={(e) => e.key === 'Escape' && (showDiscordExportModal = false)}>
+      <div class="modal-window discord-export-modal" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+        <div class="modal-header">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+            </svg>
+            <span style="font-weight: 700;">Export Unfinished Discord Downloads (AI Agent)</span>
+          </div>
+          <button class="modal-close" aria-label="Close" onclick={() => showDiscordExportModal = false}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+
+        <div class="modal-body discord-modal-body">
+          <div class="discord-info-banner">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink: 0; margin-top: 1px;">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="16" x2="12" y2="12"></line>
+              <line x1="12" y1="8" x2="12.01" y2="8"></line>
+            </svg>
+            <div>
+              <strong>For AI Scraping Agent:</strong> Give this exported JSON or URL list to your scraper. Each entry contains <code>filename</code>, <code>channel_id</code>, <code>attachment_id</code>, <code>status</code>, and <code>error</code> so the agent can quickly look up fresh download links from Discord.
+            </div>
+          </div>
+
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+            <div class="logs-filter-chips">
+              <button
+                class="log-filter-chip"
+                class:active={discordExportFormat === 'json'}
+                onclick={() => discordExportFormat = 'json'}
+              >
+                JSON (Full AI Metadata)
+              </button>
+              <button
+                class="log-filter-chip"
+                class:active={discordExportFormat === 'urls'}
+                onclick={() => discordExportFormat = 'urls'}
+              >
+                Plain URLs Only
+              </button>
+              <button
+                class="log-filter-chip"
+                class:active={discordExportFormat === 'detailed'}
+                onclick={() => discordExportFormat = 'detailed'}
+              >
+                Text Summary
+              </button>
+            </div>
+            
+            <div style="font-size: 11px; color: var(--text-dim);">
+              {unfinishedDiscordItems.length} unfinished file{unfinishedDiscordItems.length === 1 ? '' : 's'}
+            </div>
+          </div>
+
+          {#if isFetchingDiscord}
+            <div style="padding: 40px; text-align: center; color: var(--text-muted);">
+              <div class="mini-spinner" style="margin: 0 auto 10px auto;"></div>
+              <span>Scanning queue for unfinished Discord downloads...</span>
+            </div>
+          {:else if unfinishedDiscordItems.length === 0}
+            <div class="log-empty" style="padding: 30px; text-align: center;">
+              <span style="color: var(--accent-green, #3fb950); font-weight: 600;">✓ No unfinished Discord downloads found!</span>
+              <p style="margin: 6px 0 0 0; font-size: 12px; color: var(--text-dim);">All Discord downloads are either completed or queue is empty.</p>
+            </div>
+          {:else}
+            <textarea
+              class="discord-export-textarea"
+              readonly
+              rows="12"
+              value={formattedDiscordExportText}
+              onclick={(e) => e.target.select()}
+            ></textarea>
+          {/if}
+        </div>
+
+        <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
+          <div style="display: flex; gap: 8px;">
+            <button
+              class="btn btn-secondary"
+              onclick={() => { showDiscordExportModal = false; openDiscordRefreshModal(); }}
+              title="Switch to Refresh Links modal"
+            >
+              Paste Fresh Links →
+            </button>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button
+              class="btn btn-secondary"
+              disabled={unfinishedDiscordItems.length === 0}
+              onclick={() => downloadDiscordExport(discordExportFormat)}
+              title="Save as file on disk"
+            >
+              Download {discordExportFormat === 'json' ? '.json' : '.txt'}
+            </button>
+            <button
+              class="btn btn-primary"
+              disabled={unfinishedDiscordItems.length === 0}
+              onclick={copyDiscordExport}
+            >
+              {discordExportCopied ? 'Copied to Clipboard!' : 'Copy to Clipboard'}
+            </button>
+            <button class="btn btn-secondary" onclick={() => showDiscordExportModal = false}>
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Modal: Refresh Expired Discord Links -->
+  {#if showDiscordRefreshModal}
+    <div class="modal-overlay" role="presentation" onclick={() => showDiscordRefreshModal = false} onkeydown={(e) => e.key === 'Escape' && (showDiscordRefreshModal = false)}>
+      <div class="modal-window discord-refresh-modal" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+        <div class="modal-header">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+            </svg>
+            <span style="font-weight: 700;">Refresh Expired Discord Links</span>
+          </div>
+          <button class="modal-close" aria-label="Close" onclick={() => showDiscordRefreshModal = false}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+
+        <div class="modal-body discord-modal-body">
+          <div class="discord-info-banner">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink: 0; margin-top: 1px;">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="16" x2="12" y2="12"></line>
+              <line x1="12" y1="8" x2="12.01" y2="8"></line>
+            </svg>
+            <div>
+              <strong>Auto-Matching & Resume:</strong> Paste fresh Discord URLs or the output JSON from your scraper. GDDL matches items by <strong>Attachment ID</strong> or <strong>Filename</strong>, updates the URL, resets status to queued, and resumes seamlessly from existing <code>.part</code> files.
+            </div>
+          </div>
+
+          <label class="form-group" style="margin-bottom: 8px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <span class="form-title" style="margin-bottom: 0;">Paste fresh URLs or AI Scraper JSON:</span>
+              <button
+                class="btn-subtle"
+                style="font-size: 11px; color: var(--accent-blue); padding: 0; text-decoration: underline; background: transparent; border: none; cursor: pointer;"
+                onclick={() => { showDiscordRefreshModal = false; openDiscordExportModal(); }}
+              >
+                Export unfinished list first
+              </button>
+            </div>
+            <textarea
+              class="discord-refresh-textarea"
+              rows="9"
+              bind:value={discordRefreshInput}
+              placeholder={`Paste refreshed Discord URLs (one per line) or JSON array:
+https://cdn.discordapp.com/attachments/141.../154.../song.rar?ex=66f...&is=...
+https://cdn.discordapp.com/attachments/141.../155.../video.mp4?ex=66f...
+
+Or paste AI scraper JSON array:
+[{"url": "https://cdn.discordapp.com/..."}]`}
+            ></textarea>
+          </label>
+
+          {#if discordRefreshResult}
+            <div class={discordRefreshResult.success ? 'discord-alert-success' : 'discord-alert-error'}>
+              <div style="display: flex; align-items: center; gap: 8px;">
+                {#if discordRefreshResult.success}
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                {:else}
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                  </svg>
+                {/if}
+                <span>{discordRefreshResult.message}</span>
+              </div>
+              {#if discordRefreshResult.success && discordRefreshResult.not_found > 0}
+                <div style="font-size: 11px; margin-top: 4px; opacity: 0.85;">
+                  Note: {discordRefreshResult.not_found} URL(s) did not match any unfinished items currently in the queue.
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+
+        <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+          <button class="btn btn-secondary" onclick={() => showDiscordRefreshModal = false}>
+            Cancel
+          </button>
+          <button
+            class="btn btn-primary"
+            disabled={!discordRefreshInput.trim() || isRefreshingDiscord}
+            onclick={submitRefreshDiscordURLs}
+          >
+            {#if isRefreshingDiscord}
+              <div class="mini-spinner" style="display: inline-block; vertical-align: middle; margin-right: 6px; width: 12px; height: 12px;"></div>
+              <span>Updating Queue...</span>
+            {:else}
+              <span>Update & Resume Downloads</span>
+            {/if}
+          </button>
         </div>
       </div>
     </div>
@@ -6125,5 +6516,86 @@
       opacity: 1;
       transform: scale(1);
     }
+  }
+
+  /* Discord Modals styles */
+  .discord-export-modal {
+    max-width: 680px !important;
+    width: 92% !important;
+  }
+  .discord-refresh-modal {
+    max-width: 620px !important;
+    width: 92% !important;
+  }
+  .discord-modal-body {
+    padding: 1rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .discord-info-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    background: rgba(88, 101, 242, 0.12);
+    border: 1px solid rgba(88, 101, 242, 0.3);
+    border-radius: 6px;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    color: var(--text-main);
+  }
+  .discord-info-banner code {
+    background: rgba(0, 0, 0, 0.25);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.75rem;
+  }
+  .discord-export-textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.75rem;
+    line-height: 1.45;
+    background: var(--input-bg);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 8px 10px;
+    resize: vertical;
+    white-space: pre;
+    tab-size: 2;
+  }
+  .discord-refresh-textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.75rem;
+    line-height: 1.45;
+    background: var(--input-bg);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 8px 10px;
+    resize: vertical;
+  }
+  .discord-alert-success {
+    padding: 8px 12px;
+    border-radius: 4px;
+    background: rgba(46, 160, 67, 0.15);
+    border: 1px solid rgba(46, 160, 67, 0.4);
+    color: var(--accent-green, #3fb950);
+    font-size: 0.8rem;
+    font-weight: 500;
+  }
+  .discord-alert-error {
+    padding: 8px 12px;
+    border-radius: 4px;
+    background: rgba(248, 81, 73, 0.15);
+    border: 1px solid rgba(248, 81, 73, 0.4);
+    color: var(--accent-red, #f85149);
+    font-size: 0.8rem;
+    font-weight: 500;
   }
 </style>

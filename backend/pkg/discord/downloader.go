@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"math/rand"
@@ -75,6 +76,9 @@ type Downloader struct {
 
 func NewDownloader() *Downloader {
 	transport := &http.Transport{
+		// Enforce HTTP/1.1 to prevent Cloudflare/Discord HTTP/2 RST_STREAM INTERNAL_ERROR
+		TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		DisableCompression: true,
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 20,
 		IdleConnTimeout:     90 * time.Second,
@@ -155,6 +159,37 @@ func ExtractDiscordFileInfo(rawURL string) (filename string, expiry time.Time, i
 	}
 
 	return filename, expiry, isExpired, nil
+}
+
+// ExtractDiscordIDs extracts the channel ID, attachment ID, and clean filename from a Discord CDN URL.
+func ExtractDiscordIDs(rawURL string) (channelID string, attachmentID string, filename string, err error) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", "", "", fmt.Errorf("invalid URL: %w", err)
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	// Format is attachments/<channel_id>/<attachment_id>/<filename>
+	for i, part := range parts {
+		if part == "attachments" && i+2 < len(parts) {
+			channelID = parts[i+1]
+			attachmentID = parts[i+2]
+			if i+3 < len(parts) {
+				if dec, err := url.PathUnescape(parts[i+3]); err == nil && dec != "" {
+					filename = dec
+				} else {
+					filename = parts[i+3]
+				}
+			}
+			return channelID, attachmentID, filename, nil
+		}
+	}
+	fn := path.Base(u.Path)
+	if dec, err := url.PathUnescape(fn); err == nil && dec != "" {
+		filename = dec
+	} else {
+		filename = fn
+	}
+	return "", "", filename, nil
 }
 
 func applyBrowserHeaders(req *http.Request) {
