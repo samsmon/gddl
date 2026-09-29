@@ -151,6 +151,16 @@ func (m *Manager) CheckAllFiles() {
 	}
 }
 
+func (m *Manager) itemOwnsFilename(id, filename string) bool {
+	it, ok := m.items[id]
+	if !ok || id == "" {
+		return false
+	}
+	it.mu.RLock()
+	defer it.mu.RUnlock()
+	return it.Filename == filename
+}
+
 // getUniqueFilename resolves filename collisions against files on disk and items currently in the queue.
 // Must be called with m.mu held or safe for reading m.items.
 func (m *Manager) getUniqueFilename(targetFolder, filename, excludeItemID string) string {
@@ -167,9 +177,11 @@ func (m *Manager) getUniqueFilename(targetFolder, filename, excludeItemID string
 	for {
 		collision := false
 
-		// 1. Check if final file exists on disk
+		// 1. Check if final file exists on disk. A file already owned by the item being
+		// resolved (its own partial download) is not a collision, otherwise every
+		// resume would drift to a new "(N)" name and orphan the partial file.
 		finalPath := filepath.Join(targetFolder, candidate)
-		if fi, err := os.Stat(finalPath); err == nil && !fi.IsDir() {
+		if fi, err := os.Stat(finalPath); err == nil && !fi.IsDir() && !m.itemOwnsFilename(excludeItemID, candidate) {
 			collision = true
 		}
 

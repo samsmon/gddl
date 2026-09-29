@@ -180,8 +180,8 @@ func (d *Downloader) downloadSegmentedOnce(
 	if numChunks <= 1 || totalSize <= 0 {
 		return 0, errors.New("invalid chunk count or total size for segmented download")
 	}
-	if numChunks > 16 {
-		numChunks = 16
+	if numChunks > 32 {
+		numChunks = 32
 	}
 
 	segments, initialDownloaded := initOrResumeSegments(destPath, totalSize, numChunks)

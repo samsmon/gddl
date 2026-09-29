@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 
@@ -272,4 +273,47 @@ func (bm *BypassManager) DeleteFile(ctx context.Context, fileID string) error {
 	}
 
 	return nil
+}
+
+
+// GetFileMetadata retrieves the real filename and size of any file from Google Drive API.
+func (bm *BypassManager) GetFileMetadata(ctx context.Context, fileID string) (string, int64, error) {
+	token, err := bm.oauthMgr.GetValidAccessToken(ctx)
+	if err != nil {
+		return "", 0, fmt.Errorf("OAuth token error: %w", err)
+	}
+
+	apiURL := fmt.Sprintf("%s/files/%s?fields=id,name,size,mimeType&supportsAllDrives=true", GoogleDriveAPIEndpoint, fileID)
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := bm.apiClient.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", 0, fmt.Errorf("Drive API error (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	var meta struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Size     string `json:"size"`
+		MimeType string `json:"mimeType"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+		return "", 0, err
+	}
+
+	var size int64
+	if meta.Size != "" {
+		size, _ = strconv.ParseInt(meta.Size, 10, 64)
+	}
+	return SanitizeFilename(meta.Name), size, nil
 }

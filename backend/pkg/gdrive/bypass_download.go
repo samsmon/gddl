@@ -49,7 +49,9 @@ func (bm *BypassManager) DownloadClonedFile(
 	req.Header.Set("User-Agent", defaultUserAgent)
 
 	var startOffset int64
-	if fi, statErr := os.Stat(destPath); statErr == nil && fi.Size() > 0 {
+	if chunked.HasChunkMeta(destPath) {
+		// Chunked download resume: keep probe request clean without Range
+	} else if fi, statErr := os.Stat(destPath); statErr == nil && fi.Size() > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", fi.Size()))
 		startOffset = fi.Size()
 	}
@@ -60,6 +62,19 @@ func (bm *BypassManager) DownloadClonedFile(
 		return "", 0, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		resp.Body.Close()
+		_ = os.Remove(destPath)
+		_ = os.Remove(destPath + ".gddl-chunks")
+		req.Header.Del("Range")
+		resp, err = bm.streamClient.Do(req)
+		if err != nil {
+			return "", 0, err
+		}
+		defer resp.Body.Close()
+		startOffset = 0
+	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*64))

@@ -81,7 +81,7 @@ func (m *Manager) Start(id string) error {
 		return fmt.Errorf("item not found: %s", id)
 	}
 	item.mu.Lock()
-	if item.Status == StatusDownloading || item.Status == StatusQueued || item.Status == StatusCompressing || item.Status == StatusMoving || item.Status == StatusCompleted {
+	if item.Status == StatusDownloading || item.Status == StatusCompressing || item.Status == StatusMoving || item.Status == StatusCompleted {
 		item.mu.Unlock()
 		return nil
 	}
@@ -94,8 +94,9 @@ func (m *Manager) Start(id string) error {
 		}
 	}
 	item.mu.Unlock()
-	logger.Infof("Queue", "Resumed/Started download '%s'", item.Filename)
-	m.queueChan <- item
+	logger.Infof("Queue", "Force-started download '%s' (bypassing queue limit)", item.Filename)
+	// Manual start runs immediately like IDM, outside the MaxConcurrency worker pool.
+	go m.runItem(item)
 	m.triggerBroadcast()
 	m.saveToDisk()
 	return nil

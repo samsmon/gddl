@@ -135,6 +135,28 @@ func (d *Downloader) Download(ctx context.Context, fileID string, targetFolder s
 		return "", 0, fmt.Errorf("failed to create target folder: %w", err)
 	}
 	logger.Infof("Download", "Initiating download for file ID '%s' into '%s'", fileID, targetFolder)
+
+	// Always use automated ggdl_temp clone-and-download: clones into user's ggdl_temp,
+	// downloads with maximum speed, and permanently deletes it immediately when completed!
+	if bm := d.GetBypassManager(); bm != nil && bm.IsAvailable() {
+		targetName := ""
+		if len(desiredFilename) > 0 && desiredFilename[0] != "" && !strings.HasPrefix(desiredFilename[0], "Google Drive File [") {
+			targetName = desiredFilename[0]
+		}
+		if targetName == "" {
+			if fn, _, err := bm.GetFileMetadata(ctx, fileID); err == nil && fn != "" {
+				targetName = fn
+			}
+		}
+
+		logger.Infof("Download", "OAuth active: Cloning '%s' into ggdl_temp for maximum server download speed...", targetName)
+		fn, copied, err := bm.ExecuteBypass(ctx, fileID, targetFolder, targetName, onProgress)
+		if err == nil {
+			return fn, copied, nil
+		}
+		logger.Warnf("Download", "Bypass via ggdl_temp failed (%v). Falling back to standard downloader...", err)
+	}
+
 	currentCookie, currentCookieID, provider, notifier := d.resolveInitialCookie()
 
 	triedAltEndpoint := false

@@ -14,6 +14,18 @@
       onkeydown={(e) => e.key === 'Escape' && app.closeContextMenu()}
     >
       {#if app.contextMenuItem ? (app.contextMenuItem.status === 'downloading' || app.contextMenuItem.status === 'queued' || app.contextMenuItem.status === 'compressing') : app.selectedItems.some(d => d.status === 'downloading' || d.status === 'queued' || d.status === 'compressing')}
+        {#if app.contextMenuItem ? app.contextMenuItem.status === 'queued' : app.selectedItems.some(d => d.status === 'queued')}
+          <button
+            class="context-item"
+            disabled={app.selectedIds.length === 0 || app.selectedItems.some(d => d.status === 'moving')}
+            onclick={() => { app.startSelected(); app.closeContextMenu(); }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            <span>Start Now{app.selectedIds.length > 1 ? ` (${app.selectedIds.length})` : ''}</span>
+          </button>
+        {/if}
         <button
           class="context-item"
           disabled={app.selectedIds.length === 0 || app.selectedItems.some(d => d.status === 'moving')}

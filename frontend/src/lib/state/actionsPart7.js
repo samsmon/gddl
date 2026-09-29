@@ -62,7 +62,7 @@ export function attachActionsPart7(app) {
 
   app.startSelected = async function() {
     if (app.selectedIds.length === 0) return;
-    const toStart = app.downloads.filter(d => app.selectedIds.includes(d.id) && (d.status === 'paused' || d.status === 'failed' || d.status === 'cancelled'));
+    const toStart = app.downloads.filter(d => app.selectedIds.includes(d.id) && (d.status === 'queued' || d.status === 'paused' || d.status === 'failed' || d.status === 'cancelled'));
     for (const item of toStart) {
       fetch(`/api/downloads/${item.id}/start`, { method: 'POST' }).catch(console.error);
     }

@@ -33,7 +33,7 @@ func (d *Downloader) downloadSegmentWorker(
 		case <-ctx.Done():
 			setErr(ctx.Err())
 			return
-		case <-time.After(time.Duration(s.Index*80) * time.Millisecond):
+		case <-time.After(time.Duration(s.Index*20) * time.Millisecond):
 		}
 	}
 
@@ -169,7 +169,7 @@ func (d *Downloader) downloadSegmentWorker(
 			}
 		}(resp.Body)
 
-		buf := make([]byte, 128*1024)
+		buf := make([]byte, 512*1024)
 		chunkReadErr := false
 		proxyRotated := false
 

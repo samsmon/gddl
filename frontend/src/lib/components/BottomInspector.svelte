@@ -72,6 +72,11 @@
                   Re-check
                 </button>
               {:else if app.selectedItem.status === 'downloading' || app.selectedItem.status === 'queued'}
+                {#if app.selectedItem.status === 'queued'}
+                  <button class="btn-mini btn-action" onclick={() => app.startDownload(app.selectedItem.id)} title="Start now without waiting for the queue">
+                    Start Now
+                  </button>
+                {/if}
                 <button class="btn-mini btn-secondary" onclick={() => app.pauseDownload(app.selectedItem.id)}>
                   Pause
                 </button>

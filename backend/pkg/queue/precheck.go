@@ -21,6 +21,8 @@ func (m *Manager) PrecheckDownloads(rawURLs []string, targetFolder string, zipMo
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
+	prefetched := m.prefetchFileNames(ctx, rawURLs)
+
 	for _, rawURL := range rawURLs {
 		rawURL = strings.TrimSpace(rawURL)
 		if rawURL == "" {
@@ -106,12 +108,9 @@ func (m *Manager) PrecheckDownloads(rawURLs []string, targetFolder string, zipMo
 			m.mu.RUnlock()
 
 			if expectedFilename == "" {
-				if len(rawURLs) <= 1 {
-					fn, _, err := m.downloader.GetFileInfo(ctx, fileID)
-					if err == nil && fn != "" {
-						expectedFilename = fn
-						title = fn
-					}
+				if fn := prefetched[fileID]; fn != "" {
+					expectedFilename = fn
+					title = fn
 				}
 				if expectedFilename == "" {
 					expectedFilename = fmt.Sprintf("gdrive_%s.bin", fileID)

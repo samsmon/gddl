@@ -150,6 +150,12 @@ func UniqueFilename(dir, filename string) string {
 
 // GetFileInfo inspects a Google Drive fileID and discovers its filename and size.
 func (d *Downloader) GetFileInfo(ctx context.Context, fileID string) (string, int64, error) {
+	if bm := d.GetBypassManager(); bm != nil && bm.IsAvailable() {
+		if fn, sz, err := bm.GetFileMetadata(ctx, fileID); err == nil && fn != "" {
+			return fn, sz, nil
+		}
+	}
+
 	initialURL := fmt.Sprintf("https://drive.usercontent.google.com/download?id=%s&export=download&authuser=0&confirm=t", fileID)
 	req, err := http.NewRequestWithContext(ctx, "GET", initialURL, nil)
 	if err != nil {

@@ -115,10 +115,18 @@ func (m *Manager) speedWatchdogLoop() {
 
 func (m *Manager) worker() {
 	for item := range m.queueChan {
+		m.runItem(item)
+	}
+}
+
+// runItem downloads a single item. It only claims items still in the queued state,
+// so a force-started item that is also sitting in queueChan never runs twice.
+func (m *Manager) runItem(item *DownloadItem) {
+	{
 		item.mu.Lock()
-		if item.Status == StatusCancelled || item.Status == StatusPaused {
+		if item.Status != StatusQueued {
 			item.mu.Unlock()
-			continue
+			return
 		}
 		configuredChunks := m.downloader.GetChunksPerDownload()
 		item.Status = StatusDownloading
@@ -133,7 +141,7 @@ func (m *Manager) worker() {
 
 		if isFolderZip {
 			m.downloadFolderZip(ctx, item)
-			continue
+			return
 		}
 
 		var desiredName string
@@ -158,6 +166,21 @@ func (m *Manager) worker() {
 
 		var filename string
 		var err error
+
+		if !discord.IsDiscordURL(item.URL) && (strings.HasPrefix(item.Filename, "Google Drive File [") || item.Filename == "") {
+			if realFn, realSz, err := m.downloader.GetFileInfo(ctx, item.FileID); err == nil && realFn != "" && !strings.HasPrefix(realFn, "Google Drive File [") {
+				item.mu.Lock()
+				item.Filename = realFn
+				if realSz > 0 && item.TotalBytes == 0 {
+					item.TotalBytes = realSz
+				}
+				displayName = realFn
+				desiredName = realFn
+				item.mu.Unlock()
+				m.triggerBroadcast()
+				m.saveToDisk()
+			}
+		}
 
 		if discord.IsDiscordURL(item.URL) {
 			item.mu.Lock()
@@ -241,7 +264,7 @@ func (m *Manager) worker() {
 					m.queueChan <- item
 					m.triggerBroadcast()
 					m.saveToDisk()
-					continue
+					return
 				}
 
 				if isCorrupt {

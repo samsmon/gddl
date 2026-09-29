@@ -1,6 +1,8 @@
 package queue
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -143,6 +145,14 @@ func TestGetUniqueFilename(t *testing.T) {
 	expected3 := "2026_WEB-FLAC_24bit_48kHz (3).rar"
 	if uniqueName3 != expected3 {
 		t.Errorf("expected %s, got %s", expected3, uniqueName3)
+	}
+
+	// A partial file on disk owned by item-1 must not push item-1 to a new name on resume
+	if err := os.WriteFile(filepath.Join(targetDir, existingName), []byte("partial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := mgr.getUniqueFilename(targetDir, existingName, "item-1"); got != existingName {
+		t.Errorf("resume with own partial file: expected %s, got %s", existingName, got)
 	}
 
 	// However, if resolving for item1 itself (same item ID), it should keep its own name

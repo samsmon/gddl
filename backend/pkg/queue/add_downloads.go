@@ -25,6 +25,10 @@ func (m *Manager) AddWithResolutions(rawURLs []string, targetFolder string, zipM
 	var added []*DownloadItem
 	now := time.Now()
 
+	prefetchCtx, cancelPrefetch := context.WithTimeout(context.Background(), 20*time.Second)
+	prefetched := m.prefetchFileNames(prefetchCtx, rawURLs)
+	cancelPrefetch()
+
 	for _, rawURL := range rawURLs {
 		rawURL = strings.TrimSpace(rawURL)
 		if rawURL == "" {
@@ -112,11 +116,8 @@ func (m *Manager) AddWithResolutions(rawURLs []string, targetFolder string, zipM
 			fn = fmt.Sprintf("Google Drive File [%s]", fileID)
 			if existingItem != nil && existingItem.Filename != "" && !strings.HasPrefix(existingItem.Filename, "Google Drive File [") {
 				fn = existingItem.Filename
-			} else if len(rawURLs) <= 1 {
-				realFn, _, err := m.downloader.GetFileInfo(context.Background(), fileID)
-				if err == nil && realFn != "" {
-					fn = realFn
-				}
+			} else if realFn := prefetched[fileID]; realFn != "" {
+				fn = realFn
 			}
 		} else {
 			if existingItem != nil && existingItem.Filename != "" {
