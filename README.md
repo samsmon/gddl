@@ -1,66 +1,177 @@
-# Google Drive Downloader (Desktop Web Edition)
+<div align="center">
 
-[![Go Version](https://img.shields.io/badge/Go-1.22%2B-00ADD8?style=flat&logo=go)](https://golang.org)
-[![Svelte Version](https://img.shields.io/badge/Svelte-5%20(Runes)-FF3E00?style=flat&logo=svelte)](https://svelte.dev)
-[![Vite](https://img.shields.io/badge/Vite-6.x-646CFF?style=flat&logo=vite)](https://vitejs.dev)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat&logo=docker)](https://www.docker.com)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Docker%20%7C%20NAS-green)](#server-deployment--external-storage-setup)
+# Google Drive Downloader (GDDL)
 
-A high-performance, self-hosted desktop download manager for Google Drive with a native **qBittorrent & Internet Download Manager (IDM)** user interface. Built with a concurrent Go backend and a responsive Svelte 5 frontend. Features batch queuing, folder-to-ZIP compression, real-time file sync, SHA-256 integrity verification, Google session cookies for restricted files, and enterprise-grade Web UI authentication for headless server deployments.
+### Desktop Web Edition with Anti-Throttle WARP Proxy
+
+A high-performance, self-hosted desktop & server download manager for Google Drive and Discord CDN. Features a concurrent Go engine, Svelte 5 (Runes) UI, qBittorrent/IDM layout, automated Cloudflare WARP anti-throttling, folder-to-ZIP compression, and external storage auto-discovery.
+
+[![Go Version](https://img.shields.io/badge/Go-1.22%2B-00ADD8?style=flat-square&logo=go)](https://golang.org)
+[![Svelte Version](https://img.shields.io/badge/Svelte-5%20(Runes)-FF3E00?style=flat-square&logo=svelte)](https://svelte.dev)
+[![Vite](https://img.shields.io/badge/Vite-6.x-646CFF?style=flat-square&logo=vite)](https://vitejs.dev)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker)](https://www.docker.com)
+[![Cloudflare WARP](https://img.shields.io/badge/Cloudflare-WARP%20Proxy-F38020?style=flat-square&logo=cloudflare)](https://developers.cloudflare.com/warp-client/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+
+[Quick start](#quick-start) · [Architecture](#download-pipeline--architecture) · [Features](#core-features) · [Server deployment](#server-deployment--docker-compose) · [Configuration](#configuration-reference) · [Troubleshooting](#troubleshooting)
+
+</div>
 
 ---
 
-## Quick View & Screenshots
+> Built for power downloaders and homelab operators: an industrial-grade download manager that bypasses Google Drive virus scan prompts, handles 429 CDN rate limits with automatic WARP key rotation, and downloads straight to NAS mounts.
 
-### Active Transfers & Real-Time Monitoring
-![Active Transfers & Real-Time Monitoring](docs/screenshots/transfer_list.png)
-*Desktop-grade transfer grid featuring multi-select, sortable columns, real-time speed/ETA, expandable folder contents, and contextual action toolbar.*
+---
 
-### Clean Dashboard & Desktop Interface
-![Clean Dashboard & Desktop Interface](docs/screenshots/empty_dashboard.png)
-*Modern dark theme with native application menu bar (File, Edit, View, Tools, Help), category sidebar, and Jellyfin-style destination browser.*
+## Preview
+
+| Active Transfers & Real-Time Monitoring | Clean Dashboard & Category Filter |
+|---|---|
+| ![Active Transfers](docs/screenshots/transfer_list.png) | ![Clean Dashboard](docs/screenshots/empty_dashboard.png) |
+
+---
+
+## Download Pipeline & Architecture
+
+```mermaid
+flowchart TD
+    subgraph Ingestion[" 1. Ingestion & Resolution "]
+        Input["User Input<br/>(Google Drive / Discord URL)"]
+        Resolver["Token & Confirmation Resolver<br/>(Bypass Virus Scan >100MB)"]
+    end
+
+    subgraph CoreEngine[" 2. Concurrent Multi-Worker Engine "]
+        Workers["Go Goroutine Pool<br/>(1-5 Parallel Workers)"]
+        Streamer["HTTP Range Streamer<br/>(Resumable Chunk Engine)"]
+    end
+
+    subgraph AntiThrottle[" 3. Anti-Throttle & Proxy Watchdog "]
+        Watchdog{"Speed & 429<br/>Rate-Limit Check"}
+        DirectConn["Direct WAN<br/>Connection"]
+        WarpProxy["Cloudflare WARP Local Proxy<br/>(WireGuard Key Rotation)"]
+    end
+
+    subgraph StoragePipeline[" 4. Storage & Assembly "]
+        Assembly["Chunk Assembly &<br/>Folder-to-ZIP On-the-Fly"]
+        DiskCheck["Disk Presence Watchdog<br/>(MISSING / MOVED Detector)"]
+        TargetFS[("Target Storage / NAS<br/>(/mnt, /media, D:\)")]
+    end
+
+    subgraph ClientUI[" 5. Presentation Layer "]
+        SvelteUI["Svelte 5 Desktop UI<br/>(Runes + SSE Stream)"]
+        JellyBrowser["Jellyfin-Style<br/>Storage Browser"]
+    end
+
+    Input --> Resolver
+    Resolver --> Workers
+    Workers --> Streamer
+    Streamer --> Watchdog
+    Watchdog -->|Normal| DirectConn
+    Watchdog -->|Throttled / 429| WarpProxy
+    DirectConn --> Assembly
+    WarpProxy --> Assembly
+    Assembly --> DiskCheck
+    DiskCheck --> TargetFS
+    Streamer -.->|SSE Events| SvelteUI
+    DiskCheck -.->|Status Updates| SvelteUI
+    JellyBrowser -.->|Mount Paths| TargetFS
+```
 
 ---
 
 ## Core Features
 
-- **Google Drive & Discord CDN Support**: Download both Google Drive files/folders and Discord CDN attachments (`cdn.discordapp.com` and `media.discordapp.net`).
-- **Concurrent Discord Downloads with Rate-Limit Protection**: Download multiple Discord files in parallel with adaptive exponential backoff, request jitter pacing, realistic browser headers, and HTTP Range partial-content resumption against Cloudflare HTTP 429 throttling.
-- **Discord Expiry Detection**: Automatically checks the Discord CDN `ex` timestamp and alerts if an attachment link has expired before wasting bandwidth.
-- **Anti-Throttle & Cloudflare WARP Auto-Bypass**: Automatically monitors download transfer speeds and CDN HTTP 429 rate limits. When throttling is detected (e.g., speed drops below threshold for 7s), it seamlessly activates a local Cloudflare WARP SOCKS5 proxy or custom proxy pool, rotates WireGuard keys for fresh egress IPs, and reconnects active chunk streams at the exact byte offset.
-- **Custom SOCKS5/HTTP Proxy Fallback**: For environments where WARP cannot run, users can configure single or comma-separated lists of custom proxies with automatic round-robin pool rotation.
-- **Concurrent Multi-Worker Engine**: Configurable parallel workers (1 to 5) powered by lightweight Go goroutines.
-- **Bypass Virus Scan Prompts**: Automatically extracts Google Drive confirmation tokens for large files (>100MB).
-- **Smart Folder & ZIP Compression**: Paste any public or private Google Drive folder link. Choose between downloading as a subfolder or compressing all folder contents locally into a verified `.zip` archive with real-time compression progress.
-- **Conflict & Duplicate Resolution**: Automatically checks for existing files on disk or duplicate tasks in the queue when pasting links. Provides 3 options: Keep both with auto-suffix `(2)`, Overwrite & Replace, or Re-monitor & Verify integrity with resume support.
-- **Real-Time File Presence & Missing Sync**: If files are moved, renamed, or deleted from disk, the application immediately updates their status to `MISSING / MOVED` and provides a 1-click re-download button.
-- **Google Cookie Session (Restricted Files)**: Download private files, shared team drives, or files hitting "Download quota exceeded" by pasting your session cookie into the secure Tools menu.
-- **Server-Ready Web UI Authentication**: Built-in authentication (qBittorrent-style) protecting your server or VPS from unauthorized access. Supports environment variables (`AUTH_ENABLED`, `AUTH_USER`, `AUTH_PASS`).
-- **External HDD & NAS Auto-Detection**: The Jellyfin-style storage browser automatically detects external hard drives and mount points (`/mnt`, `/media`, `/volume1-9`, `D:\`, `E:\`).
-- **In-App System Logs**: Real-time diagnostic logger with error filtering, clipboard copying, and live refresh to troubleshoot rate limits or Google network timeouts.
-- **Keyboard Shortcuts**: Fully operable via desktop keybindings (`Ctrl+N`, `Ctrl+A`, `Del`, `Shift+Del`, `Space`, `Esc`).
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <h4>⚡ Download Engine & Anti-Throttling</h4>
+      <ul>
+        <li><strong>Google Drive & Discord CDN Support</strong>: Parallel downloads with Range-request resume and Discord expiry checks.</li>
+        <li><strong>Anti-Throttle WARP Watchdog</strong>: Auto-rotates WireGuard keys and switches to local SOCKS5 proxy when throttled.</li>
+        <li><strong>Large File Virus Scan Bypass</strong>: Automatically resolves confirmation tokens for &gt;100MB Google Drive files.</li>
+        <li><strong>Folder-to-ZIP Compression</strong>: Compresses Google Drive folders directly into verified <code>.zip</code> archives on the fly.</li>
+        <li><strong>Real-Time Disk Sync</strong>: Marks moved or deleted files as <code>MISSING/MOVED</code> with 1-click re-download recovery.</li>
+      </ul>
+    </td>
+    <td width="50%" valign="top">
+      <h4>🖥️ Desktop UI & Server Deployment</h4>
+      <ul>
+        <li><strong>qBittorrent / IDM Interface</strong>: Desktop-grade transfer grid built with reactive Svelte 5 Runes.</li>
+        <li><strong>Jellyfin-Style Storage Browser</strong>: Auto-discovers external hard drives and mount points (<code>/mnt</code>, <code>/media</code>, <code>D:\</code>).</li>
+        <li><strong>Google Cookie Session Support</strong>: Paste session cookies to download quota-exceeded or restricted team drive files.</li>
+        <li><strong>Server-Ready Authentication</strong>: Built-in web login protection via <code>AUTH_ENABLED</code>, <code>AUTH_USER</code>, and <code>AUTH_PASS</code>.</li>
+        <li><strong>Desktop Keybindings</strong>: Full keyboard control (<kbd>Ctrl+N</kbd> add, <kbd>Del</kbd> remove, <kbd>Space</kbd> toggle, <kbd>Ctrl+A</kbd> select).</li>
+      </ul>
+    </td>
+  </tr>
+</table>
 
 ---
 
-## Server Deployment & External Storage Setup
+## Tech Stack Matrix
 
-### Option 1: Docker Compose (Recommended for Servers & NAS)
+| Layer | Technology | Purpose |
+|---|---|---|
+| **Backend Core** | Go 1.22+ | Lightweight concurrent worker pool, SSE server, and file stream router |
+| **Frontend UI** | Svelte 5 (Runes) + Vite 6 | Reactive qBittorrent-style desktop web interface and real-time state |
+| **Styling** | Tailwind CSS | Modern responsive dark theme and utility layout |
+| **Anti-Throttle Engine** | Cloudflare WARP / WireGuard | Local SOCKS5 proxy with automated WireGuard key rotation upon 429 |
+| **Containerization** | Docker Compose (`NET_ADMIN`) | Isolated deployment with `/dev/net/tun` network capabilities |
 
-Create a `docker-compose.yml` file on your server:
+---
+
+## Quick Start
+
+### Prerequisites
+- **Go 1.22+** (for building backend from source)
+- **Node.js 20+** & **npm** (for building frontend)
+- Or simply run the pre-compiled binary.
+
+### Run Pre-Compiled Binary
+
+```bash
+# Windows
+.\gddl.exe
+
+# Linux / macOS
+./gddl
+```
+
+The Web UI will be available at `http://localhost:8080`.
+
+### Build from Source
+
+```bash
+# 1. Build the Svelte 5 frontend
+cd frontend
+npm install
+npm run build
+
+# 2. Compile the Go backend
+cd ../backend
+go build -o gddl .
+
+# 3. Launch the application
+./gddl
+```
+
+---
+
+## Server Deployment & Docker Compose
+
+Deploy on a headless server, VPS, or NAS with automatic Cloudflare WARP anti-throttling privileges:
 
 ```yaml
 version: '3.8'
 
 services:
-  gdrive-downloader:
-    image: gdrive-downloader:latest
+  gddl:
+    image: gddl:latest
     build: .
-    container_name: gdrive-downloader
+    container_name: gddl
     restart: unless-stopped
     ports:
       - "8080:8080"
-    # Capabilities & Devices for Cloudflare WARP Local Proxy (Anti-Throttle Watchdog)
     cap_add:
       - NET_ADMIN
     devices:
@@ -75,208 +186,69 @@ services:
       - AUTH_ENABLED=true
       - AUTH_USER=admin
       - AUTH_PASS=adminadmin
-      # Optional: Add extra paths for the storage browser
-      # - EXTRA_DRIVES=/mnt/external_hdd,/mnt/backup
+      # Optional: extra paths for the storage browser
+      # - EXTRA_DRIVES=/mnt/storage,/mnt/nas
     volumes:
-      # 1. State & Configuration (downloads.json & config.json survive reboots)
       - ./config:/config
-
-      # 2. Main download directory
       - ./downloads:/downloads
-
-      # 3. WARP State Persistence (retains client registration & WireGuard credentials)
       - ./warp:/var/lib/cloudflare-warp
-
-      # 4. Mount External Hard Drives, USB drives, or NAS Shares:
-      # Linux / Homelab:
+      # External storage mounts:
       # - /mnt/storage:/mnt/storage:rw
-      # - /media/usb:/media/usb:rw
-      #
-      # Synology NAS (DSM):
-      # - /volume1/downloads:/volume1/downloads:rw
-      #
-      # Unraid / TrueNAS:
-      # - /mnt/user/downloads:/mnt/user/downloads:rw
 ```
 
 Start the service:
+
 ```bash
 docker compose up -d
 ```
-Access the dashboard at `http://<your-server-ip>:8080`.
 
-#### Cloudflare WARP Setup & Registration Note
-
-The production container includes the official Cloudflare WARP client (`warp-svc` daemon and `warp-cli`).
-1. **Initial Registration**: The container automatically registers a free consumer WARP client on first launch (`warp-cli registration new` / `register`).
-2. **Docker Capabilities**:
-   - `cap_add: [NET_ADMIN]` and `devices: [/dev/net/tun:/dev/net/tun]` are required for `warp-svc` to configure network tunnels.
-   - If running inside an **unprivileged LXC container** (e.g. Proxmox VE), ensure `/dev/net/tun` is passed through and `nesting=1,keyctl=1` is enabled on the LXC host (`lxc.mount.entry: /dev/net dev/net none bind,create=dir`).
-3. **Teams / Zero Trust Token (Optional)**:
-   If you have a Cloudflare Zero Trust organization, you can enroll the container by executing inside the container:
-   ```bash
-   docker exec -it gdrive-downloader warp-cli teams-enroll <your-team-name>
-   ```
-4. **Fallback Mode**: If WARP cannot be given `NET_ADMIN` privileges in your environment, the built-in **Custom Proxy Pool** feature (in Settings -> Anti-Throttle) works out of the box without any special capabilities.
-
----
-
-### Option 2: Linux Systemd Service (VPS / Bare-Metal)
-
-1. Compile the binary or copy `gdrive-downloader` to `/opt/gdrive-downloader/`.
-2. Create the systemd service file `/etc/systemd/system/gdrive-downloader.service`:
-
-```ini
-[Unit]
-Description=Google Drive Downloader Server Daemon
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/gdrive-downloader
-ExecStart=/opt/gdrive-downloader/gdrive-downloader -port 8080 -dir /mnt/storage/downloads -config /opt/gdrive-downloader/config
-Restart=on-failure
-RestartSec=5s
-
-# Environment Variables
-Environment=PORT=8080
-Environment=HOST=0.0.0.0
-Environment=AUTH_ENABLED=true
-Environment=DOWNLOAD_DIR=/mnt/storage/downloads
-Environment=CONFIG_DIR=/opt/gdrive-downloader/config
-
-[Install]
-WantedBy=multi-user.target
-```
-
-3. Enable and start:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now gdrive-downloader
-sudo systemctl status gdrive-downloader
-```
-
----
-
-### Option 3: External Hard Drive Mounting Guide (Linux / Raspberry Pi)
-
-To make external USB hard drives or external storage permanently accessible:
-
-1. Identify the drive UUID:
-   ```bash
-   sudo blkid
-   ```
-2. Create a mount point:
-   ```bash
-   sudo mkdir -p /mnt/external_hdd
-   ```
-3. Add to `/etc/fstab` for auto-mounting on boot:
-   ```text
-   UUID=YOUR-UUID-HERE  /mnt/external_hdd  ext4  defaults,nofail  0  2
-   ```
-4. Mount the drive:
-   ```bash
-   sudo mount -a
-   ```
-5. Google Drive Downloader will automatically detect `/mnt/external_hdd` in the **Browse...** destination picker.
+> [!NOTE]
+> `cap_add: [NET_ADMIN]` and `/dev/net/tun` are required for `warp-svc` inside the container. In unprivileged LXC (e.g. Proxmox), enable `nesting=1,keyctl=1` and pass through `/dev/net/tun`.
 
 ---
 
 ## Configuration Reference
 
-You can configure the application via command-line arguments or environment variables:
+Configure via command-line flags or environment variables:
 
 | Flag | Environment Variable | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `-port` | `PORT` | `8080` | Port to listen on. |
-| `-host` | `HOST` | `0.0.0.0` | IP address to bind to (`0.0.0.0` allows LAN/WAN access). |
-| `-dir` | `DOWNLOAD_DIR` | `~/Downloads` | Default folder where files and ZIP archives are stored. |
+|---|---|---|---|
+| `-port` | `PORT` | `8080` | Port to bind the HTTP server. |
+| `-host` | `HOST` | `0.0.0.0` | IP address to bind to (`0.0.0.0` allows LAN/remote access). |
+| `-dir` | `DOWNLOAD_DIR` | `~/Downloads` | Default download directory for incoming files and ZIPs. |
 | `-config` | `CONFIG_DIR` | `.` | Directory where `config.json` and `downloads.json` are stored. |
-| `-web` | `WEB_DIR` | auto-detected | Path to the frontend `dist` directory. |
-| `-auth` | `AUTH_ENABLED` | `true` | Enable or disable Web UI login authentication (`true`/`false`). |
-| `-user` | `AUTH_USER` | `admin` | Initial Web UI username for headless deployments. |
-| `-pass` | `AUTH_PASS` | `adminadmin` | Initial Web UI password for headless deployments. |
-| - | `EXTRA_DRIVES` | `""` | Comma-separated list of additional storage mount paths. |
+| `-auth` | `AUTH_ENABLED` | `true` | Enable or disable Web UI authentication. |
+| `-user` | `AUTH_USER` | `admin` | Initial admin username for Web UI. |
+| `-pass` | `AUTH_PASS` | `adminadmin` | Initial admin password for Web UI. |
+| — | `EXTRA_DRIVES` | `""` | Comma-separated paths for the storage browser (`/mnt/hdd,/media/usb`). |
 
 ---
 
-## REST & Streaming API Documentation
+## Troubleshooting
 
-| Endpoint | Method | Description |
-| :--- | :--- | :--- |
-| `/api/events` | `GET` | **Server-Sent Events (SSE)** stream delivering live download queue state, speed, ETA, and progress. |
-| `/api/downloads` | `GET` | Get all active, queued, and completed downloads as JSON. |
-| `/api/downloads` | `POST` | Add one or multiple Google Drive URLs. Accepts `{ links: [], target_folder: "", zip_mode: true, conflict_resolutions: {} }`. |
-| `/api/downloads/precheck` | `POST` | Fast conflict precheck against active queue and disk before adding. |
-| `/api/downloads/{id}/start` | `POST` | Start / resume task. |
-| `/api/downloads/{id}/pause` | `POST` | Pause running download. |
-| `/api/downloads/{id}/restart`| `POST` | Restart download from the beginning. |
-| `/api/downloads/{id}` | `DELETE` | Delete task from list. Supports optional disk deletion: `?delete_file=true`. |
-| `/api/downloads/{id}/check` | `POST` | Check real-time file presence on disk. |
-| `/api/downloads/check-all` | `POST` | Check disk presence for all files in list. |
-| `/api/downloads/clear` | `POST` | Clear completed downloads from list. |
-| `/api/folders/resolve` | `POST` | Inspect Google Drive folder contents before adding: `{ url: "..." }`. |
-| `/api/fs/browse` | `GET` | Browse server filesystem folders and drives: `?path=/mnt`. |
-| `/api/config` | `GET` / `POST` | Read or update settings (Target folder, Concurrency, Google Cookie). |
-| `/api/auth/status` | `GET` | Check whether authentication is enabled and current login state. |
-| `/api/auth/login` | `POST` | Authenticate into Web UI: `{ username: "", password: "" }`. |
-| `/api/auth/logout` | `POST` | Terminate session and invalidate auth token. |
-| `/api/auth/password` | `POST` | Change admin username and password. |
-| `/api/auth/toggle` | `POST` | Enable or disable Web UI authentication. |
-| `/api/gdrive/cookie` | `POST` | Save Google session cookie for quota bypass. |
-| `/api/gdrive/logout` | `POST` | Clear saved Google session cookie. |
-| `/api/logs` | `GET` / `DELETE` | Fetch or clear execution and error logs. |
+| Symptom | Probable Cause | Immediate Remediation |
+|---|---|---|
+| **WARP Connection Error** | Missing `NET_ADMIN` or `/dev/net/tun` permissions | Verify Docker compose has `cap_add: [NET_ADMIN]` and `/dev/net/tun` mounted. Alternatively, configure a custom SOCKS5/HTTP proxy pool in Settings. |
+| **Download Quota Exceeded** | Google Drive public quota exhausted | Export and paste your Google session cookie (`authuser`, `HSID`, `SSID`, `SID`) via **Tools > Google Cookie** in the Web UI. |
+| **Discord CDN 403 / Expired** | Discord attachment URL `ex` timestamp expired | Refresh the attachment URL from Discord and re-add. GDDL pre-validates expiry timestamps to save bandwidth. |
+| **Moved / Missing Files** | Downloaded file was moved or deleted from disk | GDDL marks missing items as `MISSING/MOVED`. Click the **Re-download** button to fetch the file again. |
 
 ---
 
-## Desktop Keyboard Shortcuts
+## Documentation & Repository Index
 
-| Shortcut | Action |
-| :--- | :--- |
-| <kbd>Ctrl</kbd> + <kbd>N</kbd> | Open the **Add Links** modal |
-| <kbd>Ctrl</kbd> + <kbd>A</kbd> | Select all items in current category view |
-| <kbd>Esc</kbd> | Deselect all items / Close active modal or context menu |
-| <kbd>Space</kbd> | Toggle Start / Pause on selected downloads |
-| <kbd>Del</kbd> | Open delete prompt for selected downloads |
-| <kbd>Shift</kbd> + <kbd>Del</kbd> | Open delete prompt defaulted to **Remove from disk** |
-| <kbd>Ctrl</kbd> + Click | Toggle individual row selection |
-| <kbd>Shift</kbd> + Click | Select continuous range of rows |
-| Right-Click | Open desktop context menu with full controls |
-
----
-
-## Local Development & Build from Source
-
-### Prerequisites
-- **Go 1.22+**: [golang.org/dl](https://golang.org/dl/)
-- **Node.js 20+** & **npm**: [nodejs.org](https://nodejs.org/)
-
-### 1. Build the Frontend
-```bash
-cd frontend
-npm install
-npm run build
-```
-
-### 2. Compile the Backend Binary
-```bash
-cd ../backend
-go build -o gdrive-downloader.exe .
-```
-
-### 3. Run the Application
-```bash
-# On Windows:
-.\gdrive-downloader.exe
-
-# On Linux / macOS:
-./gdrive-downloader
-```
-
-Open `http://localhost:8080` in your web browser.
+| Document | Purpose | Target Audience |
+|---|---|---|
+| [docker-compose.yml](docker-compose.yml) | Production container orchestration with Cloudflare WARP and storage volumes | Homelab Operators & DevOps |
+| [config.json](config.json) | Local client runtime state, concurrency, and proxy configuration | Power Users & Administrators |
+| [TODO.md](TODO.md) | Roadmap, upcoming feature milestones, and backlog tracking | Contributors & Developers |
 
 ---
 
 ## License
-This project is open-source under the [MIT License](LICENSE).
+
+Distributed under the [MIT License](LICENSE).
+
+<div align="center">
+<sub><a href="#google-drive-downloader-gddl">Back to top ↑</a></sub>
+</div>
